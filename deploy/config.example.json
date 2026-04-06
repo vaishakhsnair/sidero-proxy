@@ -1,0 +1,11 @@
+{
+  "proxy_id": "proxy-1",
+  "redis_addr": "100.x.x.x:6379",
+  "redis_password": "changeme",
+  "ip_ttl_seconds": 604800,
+  "tproxy_port": 8080,
+  "nodes": [
+    { "public_ip": "1.2.3.4", "tailscale_ip": "100.x.x.1", "name": "node-1" },
+    { "public_ip": "1.2.3.5", "tailscale_ip": "100.x.x.2", "name": "node-2" }
+  ]
+}

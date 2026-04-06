@@ -1,0 +1,15 @@
+[Unit]
+Description=mcproxy TPROXY policy routing
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/sbin/ip rule add fwmark 1 lookup 100
+ExecStart=-/usr/sbin/ip route add local 0.0.0.0/0 dev lo table 100
+ExecStop=-/usr/sbin/ip rule del fwmark 1 lookup 100
+ExecStop=-/usr/sbin/ip route del local 0.0.0.0/0 dev lo table 100
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

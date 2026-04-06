@@ -1,0 +1,87 @@
+# mcproxy / mcwatcher / redis — multi-machine deployment via profiles
+#
+# Each machine runs only the services it needs:
+#
+#   Proxy machine:   docker compose --profile proxy up -d
+#   Host node:       docker compose --profile watcher up -d
+#   Redis machine:   docker compose --profile redis up -d
+#
+# Prerequisites on proxy machine (run once, survives reboot via /etc/rc.local):
+#   nft -f /opt/mcproxy/deploy/nftables-proxy.conf
+#   nft -f /opt/mcproxy/deploy/nftables-tproxy.conf
+#   nft -f /opt/mcproxy/deploy/nftables-filter.conf
+#   ip rule add fwmark 1 lookup 100
+#   ip route add local 0.0.0.0/0 dev lo table 100
+#
+# Config file locations:
+#   /etc/mcproxy/config.json    — mcproxy config (proxy machines)
+#   /etc/mcproxy/watcher.json   — mcwatcher config (host nodes)
+
+services:
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  # Runs on the Redis machine (or co-located on the Hetzner host).
+  # Binds only to the Tailscale interface — set REDIS_BIND to the tailscale IP.
+  redis:
+    profiles: [redis]
+    image: redis:7-alpine
+    restart: always
+    network_mode: host
+    command: >
+      redis-server
+      --bind ${REDIS_BIND:-127.0.0.1}
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── mcproxy ───────────────────────────────────────────────────────────────
+  # Runs on proxy machines.
+  # Requires NET_ADMIN and host networking to reach host kernel nftables.
+  # The nftables tables/maps must already exist before starting.
+  mcproxy:
+    profiles: [proxy]
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    image: ghcr.io/siderocloud/mcproxy:latest
+    restart: always
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - /etc/mcproxy/config.json:/config.json:ro
+    logging:
+      driver: journald
+      options:
+        tag: mcproxy
+
+  # ── mcwatcher ─────────────────────────────────────────────────────────────
+  # Runs on Hetzner/GorillaServer host nodes.
+  # Needs read-write access to pterodactyl volumes to remove proxy IPs from
+  # banned-ips.json after a ban event is processed.
+  mcwatcher:
+    profiles: [watcher]
+    build:
+      context: .
+      dockerfile: Dockerfile.watcher
+    image: ghcr.io/siderocloud/mcwatcher:latest
+    restart: always
+    network_mode: host
+    volumes:
+      - /etc/mcproxy/watcher.json:/config.json:ro
+      - ${PTERODACTYL_VOLUMES:-/var/lib/pterodactyl/volumes}:${PTERODACTYL_VOLUMES:-/var/lib/pterodactyl/volumes}:rw
+    logging:
+      driver: journald
+      options:
+        tag: mcwatcher
+
+volumes:
+  redis-data:

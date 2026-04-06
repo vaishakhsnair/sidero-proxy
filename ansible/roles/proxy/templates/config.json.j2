@@ -1,0 +1,12 @@
+{
+  "proxy_id": "{{ proxy_id }}",
+  "redis_addr": "{{ redis_addr }}",
+  "redis_password": "{{ redis_password }}",
+  "ip_ttl_seconds": {{ ip_ttl_seconds }},
+  "tproxy_port": {{ tproxy_port }},
+  "nodes": [
+{% for node in nodes %}
+    { "public_ip": "{{ node.public_ip }}", "tailscale_ip": "{{ node.tailscale_ip }}", "name": "{{ node.name }}" }{% if not loop.last %},{% endif %}
+{% endfor %}
+  ]
+}

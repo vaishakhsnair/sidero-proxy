@@ -1,0 +1,5 @@
+{
+  "redis_addr": "100.x.x.x:6379",
+  "redis_password": "changeme",
+  "volumes_root": "/var/lib/pterodactyl/volumes"
+}

@@ -1,0 +1,22 @@
+---
+- name: Configure Redis servers
+  hosts: redis_servers
+  become: true
+  roles:
+    - common
+    - redis
+
+- name: Configure proxy servers
+  hosts: proxies
+  become: true
+  roles:
+    - common
+    - proxy
+
+- name: Configure watcher nodes
+  hosts: watchers
+  become: true
+  roles:
+    - common
+    - watcher
+

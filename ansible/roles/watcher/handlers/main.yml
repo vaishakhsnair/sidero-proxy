@@ -1,0 +1,7 @@
+---
+- name: Restart watcher
+  command: docker compose --profile watcher up -d --build
+  args:
+    chdir: "{{ mcproxy_deploy_dir }}"
+  environment:
+    PTERODACTYL_VOLUMES: "{{ volumes_root }}"

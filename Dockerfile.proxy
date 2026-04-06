@@ -1,0 +1,9 @@
+FROM golang:1.21 AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o mcproxy ./cmd/proxy
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/mcproxy /usr/local/bin/mcproxy
+ENTRYPOINT ["mcproxy", "-config", "/config.json"]

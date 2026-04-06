@@ -1,0 +1,29 @@
+---
+- name: Ensure watcher config directory exists
+  file:
+    path: /etc/mcproxy
+    state: directory
+    mode: "0755"
+
+- name: Accept Tailscale routes on watcher host
+  command:
+    argv:
+      - tailscale
+      - up
+      - --accept-routes
+  register: watcher_tailscale_up
+  changed_when: "'Success.' in watcher_tailscale_up.stdout or 'Success.' in watcher_tailscale_up.stderr"
+
+- name: Render watcher config
+  template:
+    src: watcher.json.j2
+    dest: /etc/mcproxy/watcher.json
+    mode: "0600"
+  notify: Restart watcher
+
+- name: Start watcher compose profile
+  command: docker compose --profile watcher up -d --build
+  args:
+    chdir: "{{ mcproxy_deploy_dir }}"
+  environment:
+    PTERODACTYL_VOLUMES: "{{ volumes_root }}"

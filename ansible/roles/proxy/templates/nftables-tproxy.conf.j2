@@ -1,0 +1,9 @@
+# TPROXY intercept — rendered by Ansible.
+
+table ip mangle {
+  chain PREROUTING {
+    type filter hook prerouting priority mangle;
+    ip daddr { {% for node in nodes %}{{ node.public_ip }}{% if not loop.last %}, {% endif %}{% endfor %} } tcp \
+      tproxy to 127.0.0.1:{{ tproxy_port }} meta mark set 1
+  }
+}
