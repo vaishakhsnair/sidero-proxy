@@ -6,24 +6,21 @@ import (
 	"sync"
 )
 
-// Forward performs bidirectional TCP copy between client and backend.
-// Returns when either side closes or errors.
-func Forward(client, backend net.Conn) {
+func Proxy(client, backend net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	copy := func(dst, src net.Conn) {
+	pipe := func(dst, src net.Conn) {
 		defer wg.Done()
-		io.Copy(dst, src) //nolint:errcheck
-		// Signal the other direction to stop by closing the write side.
-		if tc, ok := dst.(*net.TCPConn); ok {
-			tc.CloseWrite() //nolint:errcheck
-		} else {
-			dst.Close()
+		_, _ = io.Copy(dst, src)
+		if tcp, ok := dst.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+			return
 		}
+		_ = dst.Close()
 	}
 
-	go copy(backend, client)
-	go copy(client, backend)
+	go pipe(backend, client)
+	go pipe(client, backend)
 	wg.Wait()
 }

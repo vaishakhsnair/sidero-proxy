@@ -1,7 +1,0 @@
----
-- name: Configure watcher nodes
-  hosts: watchers
-  become: true
-  roles:
-    - common
-    - watcher

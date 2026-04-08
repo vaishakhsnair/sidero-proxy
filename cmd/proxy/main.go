@@ -3,94 +3,62 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"fmt"
 	"os/signal"
 	"syscall"
 
-	"github.com/redis/go-redis/v9"
 	"sidero-proxy/internal/assignment"
-	"sidero-proxy/internal/ban"
 	"sidero-proxy/internal/config"
+	"sidero-proxy/internal/logx"
 	"sidero-proxy/internal/nat"
+	"sidero-proxy/internal/redisutil"
 	"sidero-proxy/internal/registration"
 	"sidero-proxy/internal/router"
 )
 
 func main() {
-	cfgPath := flag.String("config", "config.json", "path to config file")
+	configPath := flag.String("config", "config.json", "path to proxy config")
 	flag.Parse()
 
-	cfg, err := config.Load(*cfgPath)
+	logger := logx.New("proxy")
+
+	cfg, err := config.LoadProxy(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		panic(fmt.Errorf("load proxy config: %w", err))
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-	})
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("redis ping: %v", err)
+	rdb := redisutil.NewClient(cfg.RedisAddr, cfg.RedisPassword)
+	if err := redisutil.Ping(ctx, rdb); err != nil {
+		panic(err)
 	}
+	defer func() { _ = rdb.Close() }()
 
-	// Register proxy and get subnet allocation
-	proxyNum, subnet, err := registration.Register(ctx, rdb, cfg.ProxyID)
+	info, proxyNum, err := registration.Register(ctx, rdb, cfg.ProxyID)
 	if err != nil {
-		log.Fatalf("register: %v", err)
+		panic(fmt.Errorf("register proxy: %w", err))
 	}
-	log.Printf("proxy %s registered: subnet %s (num %d)", cfg.ProxyID, subnet, proxyNum)
+	logger.Info("proxy registered", "proxy_id", cfg.ProxyID, "subnet", info.Subnet, "proxy_num", proxyNum)
+	logger.Info("proxy port range configured", "start_port", cfg.PortRange.Start, "end_port", cfg.PortRange.End, "intercept_port", cfg.InterceptPort, "public_ip_mappings", len(cfg.Servers))
 
-	// Write node mappings to Redis
-	if err := registration.WriteNodeMap(ctx, rdb, cfg.Nodes); err != nil {
-		log.Fatalf("WriteNodeMap: %v", err)
+	natManager := nat.NewNATManager(nat.ExecRunner{})
+	if err := natManager.Ensure(ctx); err != nil {
+		panic(fmt.Errorf("ensure nftables nat rules: %w", err))
 	}
-
-	// Build in-memory nodeMap (read-only after this point)
-	nodeMap := make(map[string]string, len(cfg.Nodes))
-	for _, node := range cfg.Nodes {
-		nodeMap[node.PublicIP] = node.TailscaleIP
+	redirectManager := nat.NewProxyRedirectManager(nat.ExecRunner{})
+	publicIPs := make([]string, 0, len(cfg.Servers))
+	for _, server := range cfg.Servers {
+		publicIPs = append(publicIPs, server.ProxyPublicIP)
 	}
-
-	// Initialize nftables managers
-	natMgr, err := nat.New()
-	if err != nil {
-		log.Fatalf("nat: %v", err)
-	}
-	// Flush stale NAT entries from a previous run
-	if err := natMgr.Flush(); err != nil {
-		log.Printf("warn: nat flush: %v", err)
+	if err := redirectManager.Ensure(ctx, publicIPs, cfg.PortRange.Start, cfg.PortRange.End, cfg.InterceptPort); err != nil {
+		panic(fmt.Errorf("ensure proxy redirect rules: %w", err))
 	}
 
-	blocklistMgr, err := nat.NewBlocklistManager()
-	if err != nil {
-		log.Fatalf("blocklist: %v", err)
-	}
-
-	// Initialize ban enforcer and load state from Redis
-	enforcer := ban.NewEnforcer(rdb, cfg.ProxyID, blocklistMgr)
-	if err := enforcer.LoadFromRedis(ctx); err != nil {
-		log.Fatalf("enforcer load: %v", err)
-	}
-
-	// Initialize IP assigner and pre-warm cache
 	assigner := assignment.New(rdb, cfg.ProxyID, proxyNum, cfg.IPTTLSeconds)
-	if err := assigner.LoadCache(ctx); err != nil {
-		log.Printf("warn: assigner load cache: %v", err)
-	}
-
-	// Subscribe to ban events in background
-	go func() {
-		if err := enforcer.Subscribe(ctx); err != nil {
-			log.Printf("enforcer subscribe: %v", err)
-		}
-	}()
-
-	// Start router
-	r := router.New(cfg, nodeMap, assigner, enforcer, natMgr)
+	r := router.New(cfg, assigner, natManager, logger)
 	if err := r.Start(ctx); err != nil {
-		log.Fatalf("router: %v", err)
+		panic(fmt.Errorf("run proxy: %w", err))
 	}
 }

@@ -1,8 +1,0 @@
----
-- name: Start Redis compose profile
-  command: docker compose --profile redis up -d
-  args:
-    chdir: "{{ mcproxy_deploy_dir }}"
-  environment:
-    REDIS_BIND: "{{ redis_tailscale_ip }}"
-    REDIS_PASSWORD: "{{ redis_password }}"

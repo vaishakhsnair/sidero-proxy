@@ -1,175 +1,181 @@
 package nat
 
 import (
+	"bytes"
+	"context"
 	"fmt"
-	"net"
+	"os/exec"
+	"sort"
+	"strings"
 	"sync"
-
-	"github.com/google/nftables"
 )
 
-// NATManager manages the nftables nat_map (ip nat table) via netlink.
-// The table and map must already exist (created by deploy/nftables-proxy.conf).
+type ScriptRunner interface {
+	Run(ctx context.Context, script string) error
+}
+
+type ExecRunner struct{}
+
+func (ExecRunner) Run(ctx context.Context, script string) error {
+	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nft failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 type NATManager struct {
 	mu     sync.Mutex
-	conn   *nftables.Conn
-	tbl    *nftables.Table
-	natMap *nftables.Set
+	runner ScriptRunner
 }
 
-func New() (*NATManager, error) {
-	conn, err := nftables.New()
-	if err != nil {
-		return nil, fmt.Errorf("nftables.New: %w", err)
+func NewNATManager(runner ScriptRunner) *NATManager {
+	return &NATManager{runner: runner}
+}
+
+func (m *NATManager) Ensure(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add table ip mcproxy_nat\n")); err != nil {
+		return err
+	}
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add chain ip mcproxy_nat postrouting { type nat hook postrouting priority srcnat; }\n")); err != nil {
+		return err
+	}
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add map ip mcproxy_nat nat_map { type ipv4_addr : ipv4_addr; }\n")); err != nil {
+		return err
+	}
+	if err := m.runner.Run(ctx, "flush chain ip mcproxy_nat postrouting\n"); err != nil {
+		return err
+	}
+	return m.runner.Run(ctx, "add rule ip mcproxy_nat postrouting snat to ip saddr map @nat_map\n")
+}
+
+func (m *NATManager) Add(ctx context.Context, realIP, internalIP string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	script := fmt.Sprintf("add element ip mcproxy_nat nat_map { %s : %s }\n", realIP, internalIP)
+	return m.runner.Run(ctx, script)
+}
+
+func (m *NATManager) Delete(ctx context.Context, realIP string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	script := fmt.Sprintf("delete element ip mcproxy_nat nat_map { %s }\n", realIP)
+	return ignoreMissing(m.runner.Run(ctx, script))
+}
+
+type ProxyRedirectManager struct {
+	mu     sync.Mutex
+	runner ScriptRunner
+}
+
+func NewProxyRedirectManager(runner ScriptRunner) *ProxyRedirectManager {
+	return &ProxyRedirectManager{runner: runner}
+}
+
+func (m *ProxyRedirectManager) Ensure(ctx context.Context, publicIPs []string, startPort, endPort, interceptPort int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sortedIPs := append([]string(nil), publicIPs...)
+	sort.Strings(sortedIPs)
+
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add table ip mcproxy_intercept\n")); err != nil {
+		return err
+	}
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add set ip mcproxy_intercept public_ips { type ipv4_addr; }\n")); err != nil {
+		return err
+	}
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add chain ip mcproxy_intercept prerouting { type nat hook prerouting priority dstnat; }\n")); err != nil {
+		return err
+	}
+	if err := m.runner.Run(ctx, "flush set ip mcproxy_intercept public_ips\n"); err != nil {
+		return err
+	}
+	if err := m.runner.Run(ctx, "flush chain ip mcproxy_intercept prerouting\n"); err != nil {
+		return err
 	}
 
-	tables, err := conn.ListTables()
-	if err != nil {
-		return nil, fmt.Errorf("ListTables: %w", err)
-	}
-
-	var natTable *nftables.Table
-	for _, t := range tables {
-		if t.Name == "nat" && t.Family == nftables.TableFamilyIPv4 {
-			natTable = t
-			break
+	if len(sortedIPs) > 0 {
+		var b strings.Builder
+		b.WriteString("add element ip mcproxy_intercept public_ips { ")
+		for i, ip := range sortedIPs {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(ip)
+		}
+		b.WriteString(" }\n")
+		if err := m.runner.Run(ctx, b.String()); err != nil {
+			return err
 		}
 	}
-	if natTable == nil {
-		return nil, fmt.Errorf("table ip nat not found — apply deploy/nftables-proxy.conf first")
-	}
 
-	sets, err := conn.GetSets(natTable)
-	if err != nil {
-		return nil, fmt.Errorf("GetSets: %w", err)
-	}
+	rule := fmt.Sprintf("add rule ip mcproxy_intercept prerouting ip daddr @public_ips tcp dport %d-%d redirect to :%d\n", startPort, endPort, interceptPort)
+	return m.runner.Run(ctx, rule)
+}
 
-	var natMap *nftables.Set
-	for _, s := range sets {
-		if s.Name == "nat_map" {
-			natMap = s
-			break
+type NodeDNATManager struct {
+	mu     sync.Mutex
+	runner ScriptRunner
+}
+
+func NewNodeDNATManager(runner ScriptRunner) *NodeDNATManager {
+	return &NodeDNATManager{runner: runner}
+}
+
+func (m *NodeDNATManager) Ensure(ctx context.Context, publicIP, tailscaleInterface string, ports []int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sort.Ints(ports)
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add table ip mcproxy_node\n")); err != nil {
+		return err
+	}
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add chain ip mcproxy_node prerouting { type nat hook prerouting priority dstnat; }\n")); err != nil {
+		return err
+	}
+	if err := m.runner.Run(ctx, "flush chain ip mcproxy_node prerouting\n"); err != nil {
+		return err
+	}
+	for _, port := range ports {
+		rule := fmt.Sprintf("add rule ip mcproxy_node prerouting iifname %q tcp dport %d dnat to %s:%d\n", tailscaleInterface, port, publicIP, port)
+		if err := m.runner.Run(ctx, rule); err != nil {
+			return err
 		}
 	}
-	if natMap == nil {
-		return nil, fmt.Errorf("map nat_map not found — apply deploy/nftables-proxy.conf first")
-	}
-
-	return &NATManager{conn: conn, tbl: natTable, natMap: natMap}, nil
+	return nil
 }
 
-// Add inserts a realIP → internalIP entry into the nat_map.
-func (n *NATManager) Add(realIP, internalIP string) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	real := net.ParseIP(realIP).To4()
-	internal := net.ParseIP(internalIP).To4()
-	if real == nil || internal == nil {
-		return fmt.Errorf("invalid IP: %q → %q", realIP, internalIP)
+func (m *NodeDNATManager) EnsureRange(ctx context.Context, publicIP, tailscaleInterface string, startPort, endPort int) error {
+	ports := make([]int, 0, endPort-startPort+1)
+	for port := startPort; port <= endPort; port++ {
+		ports = append(ports, port)
 	}
-
-	err := n.conn.SetAddElements(n.natMap, []nftables.SetElement{
-		{Key: real, Val: internal},
-	})
-	if err != nil {
-		return fmt.Errorf("SetAddElements: %w", err)
-	}
-	return n.conn.Flush()
+	return m.Ensure(ctx, publicIP, tailscaleInterface, ports)
 }
 
-// Delete removes a realIP entry from the nat_map.
-func (n *NATManager) Delete(realIP string) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	real := net.ParseIP(realIP).To4()
-	if real == nil {
-		return fmt.Errorf("invalid IP: %q", realIP)
+func ignoreAlreadyExists(err error) error {
+	if err == nil {
+		return nil
 	}
-
-	err := n.conn.SetDeleteElements(n.natMap, []nftables.SetElement{
-		{Key: real},
-	})
-	if err != nil {
-		return fmt.Errorf("SetDeleteElements: %w", err)
+	if strings.Contains(err.Error(), "File exists") {
+		return nil
 	}
-	return n.conn.Flush()
+	return err
 }
 
-// Flush removes all elements from the nat_map.
-func (n *NATManager) Flush() error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.conn.FlushSet(n.natMap)
-	return n.conn.Flush()
+func ignoreMissing(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "No such file or directory") || strings.Contains(err.Error(), "No such file") {
+		return nil
+	}
+	return err
 }
-
-// BlocklistManager manages the inet filter blocklist set via netlink.
-type BlocklistManager struct {
-	mu        sync.Mutex
-	conn      *nftables.Conn
-	tbl       *nftables.Table
-	blocklist *nftables.Set
-}
-
-func NewBlocklistManager() (*BlocklistManager, error) {
-	conn, err := nftables.New()
-	if err != nil {
-		return nil, fmt.Errorf("nftables.New: %w", err)
-	}
-
-	tables, err := conn.ListTables()
-	if err != nil {
-		return nil, fmt.Errorf("ListTables: %w", err)
-	}
-
-	var filterTable *nftables.Table
-	for _, t := range tables {
-		if t.Name == "filter" && t.Family == nftables.TableFamilyINet {
-			filterTable = t
-			break
-		}
-	}
-	if filterTable == nil {
-		return nil, fmt.Errorf("table inet filter not found — apply deploy/nftables-filter.conf first")
-	}
-
-	sets, err := conn.GetSets(filterTable)
-	if err != nil {
-		return nil, fmt.Errorf("GetSets: %w", err)
-	}
-
-	var blocklist *nftables.Set
-	for _, s := range sets {
-		if s.Name == "blocklist" {
-			blocklist = s
-			break
-		}
-	}
-	if blocklist == nil {
-		return nil, fmt.Errorf("set blocklist not found — apply deploy/nftables-filter.conf first")
-	}
-
-	return &BlocklistManager{conn: conn, tbl: filterTable, blocklist: blocklist}, nil
-}
-
-// Block adds an IP to the blocklist set.
-func (b *BlocklistManager) Block(ip string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	parsed := net.ParseIP(ip).To4()
-	if parsed == nil {
-		return fmt.Errorf("invalid IP: %q", ip)
-	}
-
-	err := b.conn.SetAddElements(b.blocklist, []nftables.SetElement{
-		{Key: parsed},
-	})
-	if err != nil {
-		return fmt.Errorf("SetAddElements blocklist: %w", err)
-	}
-	return b.conn.Flush()
-}
-

@@ -1,5 +1,13 @@
 {
-  "redis_addr": "100.x.x.x:6379",
-  "redis_password": "changeme",
-  "volumes_root": "/var/lib/pterodactyl/volumes"
+  "redis_addr": "100.100.100.10:6379",
+  "redis_password": "change-me",
+  "volumes_root": "/var/lib/pterodactyl/volumes",
+  "node_dnat": {
+    "public_ip": "167.235.15.102",
+    "tailscale_interface": "tailscale0",
+    "port_range": {
+      "start": 25500,
+      "end": 25600
+    }
+  }
 }

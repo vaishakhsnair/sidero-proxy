@@ -4,71 +4,106 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"sort"
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"sidero-proxy/internal/config"
 )
 
 type ProxyInfo struct {
-	Subnet      string `json:"subnet"`
-	TailscaleIP string `json:"tailscale_ip"`
+	Subnet       string `json:"subnet"`
+	TailscaleIP  string `json:"tailscale_ip,omitempty"`
 	RegisteredAt int64  `json:"registered_at"`
 }
 
-// Register ensures this proxy has a subnet allocated in Redis.
-// Returns proxyNum (e.g. 1 for 10.1.0.0/16) and the subnet string.
-func Register(ctx context.Context, rdb *redis.Client, proxyID string) (proxyNum int, subnet string, err error) {
-	// Check if already registered
-	val, err := rdb.HGet(ctx, "proxy:registry", proxyID).Result()
+const (
+	registryKey      = "proxy:registry"
+	subnetCounterKey = "proxy:subnet_counter"
+)
+
+func Register(ctx context.Context, rdb *redis.Client, proxyID string) (ProxyInfo, int, error) {
+	val, err := rdb.HGet(ctx, registryKey, proxyID).Result()
 	if err == nil {
 		var info ProxyInfo
-		if jsonErr := json.Unmarshal([]byte(val), &info); jsonErr != nil {
-			return 0, "", fmt.Errorf("unmarshal proxy info: %w", jsonErr)
+		if err := json.Unmarshal([]byte(val), &info); err != nil {
+			return ProxyInfo{}, 0, fmt.Errorf("decode proxy registry for %s: %w", proxyID, err)
 		}
-		// Parse proxy number from subnet (10.{n}.0.0/16)
-		var a, b int
-		fmt.Sscanf(info.Subnet, "10.%d.%d.0/16", &a, &b)
-		return a, info.Subnet, nil
+		proxyNum, err := ProxyNumFromSubnet(info.Subnet)
+		if err != nil {
+			return ProxyInfo{}, 0, err
+		}
+		return info, proxyNum, nil
 	}
 	if err != redis.Nil {
-		return 0, "", fmt.Errorf("HGET proxy:registry: %w", err)
+		return ProxyInfo{}, 0, fmt.Errorf("load proxy registry: %w", err)
 	}
 
-	// Allocate new subnet slot
-	n, err := rdb.Incr(ctx, "proxy:subnet_counter").Result()
+	slot, err := rdb.Incr(ctx, subnetCounterKey).Result()
 	if err != nil {
-		return 0, "", fmt.Errorf("INCR proxy:subnet_counter: %w", err)
+		return ProxyInfo{}, 0, fmt.Errorf("allocate subnet slot: %w", err)
 	}
-	if n > 254 {
-		return 0, "", fmt.Errorf("proxy subnet space exhausted (max 254 proxies)")
+	if slot <= 0 || slot > 254 {
+		return ProxyInfo{}, 0, fmt.Errorf("proxy subnet space exhausted: %d", slot)
 	}
 
-	sub := fmt.Sprintf("10.%d.0.0/16", n)
 	info := ProxyInfo{
-		Subnet:       sub,
+		Subnet:       fmt.Sprintf("10.%d.0.0/16", slot),
 		RegisteredAt: time.Now().Unix(),
 	}
-	data, _ := json.Marshal(info)
-
-	if err := rdb.HSet(ctx, "proxy:registry", proxyID, data).Err(); err != nil {
-		return 0, "", fmt.Errorf("HSET proxy:registry: %w", err)
+	encoded, err := json.Marshal(info)
+	if err != nil {
+		return ProxyInfo{}, 0, fmt.Errorf("encode proxy registry: %w", err)
 	}
-
-	return int(n), sub, nil
+	if err := rdb.HSet(ctx, registryKey, proxyID, encoded).Err(); err != nil {
+		return ProxyInfo{}, 0, fmt.Errorf("write proxy registry: %w", err)
+	}
+	return info, int(slot), nil
 }
 
-// WriteNodeMap writes node public_ip → tailscale_ip/name mappings to Redis.
-// Called on every proxy startup; all proxies write the same data.
-func WriteNodeMap(ctx context.Context, rdb *redis.Client, nodes []config.NodeConfig) error {
-	for _, node := range nodes {
-		data, _ := json.Marshal(map[string]string{
-			"tailscale_ip": node.TailscaleIP,
-			"name":         node.Name,
-		})
-		if err := rdb.Set(ctx, "node:"+node.PublicIP, data, 0).Err(); err != nil {
-			return fmt.Errorf("SET node:%s: %w", node.PublicIP, err)
-		}
+func ListProxies(ctx context.Context, rdb *redis.Client) (map[string]ProxyInfo, error) {
+	raw, err := rdb.HGetAll(ctx, registryKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read proxy registry: %w", err)
 	}
-	return nil
+	out := make(map[string]ProxyInfo, len(raw))
+	for proxyID, val := range raw {
+		var info ProxyInfo
+		if err := json.Unmarshal([]byte(val), &info); err != nil {
+			return nil, fmt.Errorf("decode proxy registry for %s: %w", proxyID, err)
+		}
+		out[proxyID] = info
+	}
+	return out, nil
+}
+
+func SortedProxyIDs(proxies map[string]ProxyInfo) []string {
+	ids := make([]string, 0, len(proxies))
+	for id := range proxies {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func ProxyNumFromSubnet(subnet string) (int, error) {
+	ip, network, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return 0, fmt.Errorf("parse subnet %q: %w", subnet, err)
+	}
+	if ip4 := ip.To4(); ip4 == nil {
+		return 0, fmt.Errorf("subnet %q is not IPv4", subnet)
+	}
+	ones, bits := network.Mask.Size()
+	if bits != 32 || ones != 16 {
+		return 0, fmt.Errorf("subnet %q must be /16", subnet)
+	}
+	ip4 := ip.To4()
+	if ip4[0] != 10 || ip4[2] != 0 || ip4[3] != 0 {
+		return 0, fmt.Errorf("subnet %q must match 10.<n>.0.0/16", subnet)
+	}
+	if ip4[1] == 0 || ip4[1] == 255 {
+		return 0, fmt.Errorf("subnet %q has invalid proxy slot", subnet)
+	}
+	return int(ip4[1]), nil
 }

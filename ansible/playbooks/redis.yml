@@ -1,7 +1,0 @@
----
-- name: Configure Redis servers
-  hosts: redis_servers
-  become: true
-  roles:
-    - common
-    - redis

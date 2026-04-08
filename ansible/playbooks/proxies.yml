@@ -1,7 +1,0 @@
----
-- name: Configure proxy servers
-  hosts: proxies
-  become: true
-  roles:
-    - common
-    - proxy

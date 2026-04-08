@@ -1,11 +1,23 @@
 {
   "proxy_id": "proxy-1",
-  "redis_addr": "100.x.x.x:6379",
-  "redis_password": "changeme",
+  "redis_addr": "100.100.100.10:6379",
+  "redis_password": "change-me",
   "ip_ttl_seconds": 604800,
-  "tproxy_port": 8080,
-  "nodes": [
-    { "public_ip": "1.2.3.4", "tailscale_ip": "100.x.x.1", "name": "node-1" },
-    { "public_ip": "1.2.3.5", "tailscale_ip": "100.x.x.2", "name": "node-2" }
+  "intercept_port": 19000,
+  "port_range": {
+    "start": 25500,
+    "end": 25600
+  },
+  "servers": [
+    {
+      "name": "node-a",
+      "proxy_public_ip": "203.0.113.10",
+      "backend_ip": "100.72.10.5"
+    },
+    {
+      "name": "node-b",
+      "proxy_public_ip": "203.0.113.11",
+      "backend_ip": "100.72.10.6"
+    }
   ]
 }
