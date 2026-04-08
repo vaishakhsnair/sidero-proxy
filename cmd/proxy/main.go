@@ -9,6 +9,7 @@ import (
 
 	"sidero-proxy/internal/assignment"
 	"sidero-proxy/internal/config"
+	"sidero-proxy/internal/filter"
 	"sidero-proxy/internal/logx"
 	"sidero-proxy/internal/nat"
 	"sidero-proxy/internal/redisutil"
@@ -57,6 +58,10 @@ func main() {
 	publicIPs := make([]string, 0, len(cfg.Servers))
 	for _, server := range cfg.Servers {
 		publicIPs = append(publicIPs, server.ProxyPublicIP)
+	}
+	filterManager := filter.NewManager(filter.ExecRunner{})
+	if err := filterManager.Ensure(ctx, publicIPs, cfg.PortRange.Start, cfg.PortRange.End); err != nil {
+		panic(fmt.Errorf("ensure proxy prefilter rules: %w", err))
 	}
 	if err := redirectManager.Ensure(ctx, publicIPs, cfg.PortRange.Start, cfg.PortRange.End, cfg.InterceptPort); err != nil {
 		panic(fmt.Errorf("ensure proxy redirect rules: %w", err))
