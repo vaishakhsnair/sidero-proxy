@@ -14,6 +14,7 @@ import (
 	"sidero-proxy/internal/redisutil"
 	"sidero-proxy/internal/registration"
 	"sidero-proxy/internal/router"
+	"sidero-proxy/internal/source"
 )
 
 func main() {
@@ -43,6 +44,11 @@ func main() {
 	logger.Info("proxy registered", "proxy_id", cfg.ProxyID, "subnet", info.Subnet, "proxy_num", proxyNum)
 	logger.Info("proxy port range configured", "start_port", cfg.PortRange.Start, "end_port", cfg.PortRange.End, "intercept_port", cfg.InterceptPort, "public_ip_mappings", len(cfg.Servers))
 
+	routeManager := source.NewRouteManager(source.ExecRunner{})
+	if err := routeManager.EnsureLocalSubnet(ctx, info.Subnet); err != nil {
+		panic(fmt.Errorf("ensure local route for %s: %w", info.Subnet, err))
+	}
+
 	natManager := nat.NewNATManager(nat.ExecRunner{})
 	if err := natManager.Ensure(ctx); err != nil {
 		panic(fmt.Errorf("ensure nftables nat rules: %w", err))
@@ -57,7 +63,7 @@ func main() {
 	}
 
 	assigner := assignment.New(rdb, cfg.ProxyID, proxyNum, cfg.IPTTLSeconds)
-	r := router.New(cfg, assigner, natManager, logger)
+	r := router.New(cfg, assigner, natManager, source.TransparentDialer{}, logger)
 	if err := r.Start(ctx); err != nil {
 		panic(fmt.Errorf("run proxy: %w", err))
 	}

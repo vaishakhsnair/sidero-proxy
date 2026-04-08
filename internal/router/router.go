@@ -22,7 +22,10 @@ type Assigner interface {
 	Assign(ctx context.Context, realIP string) (string, error)
 }
 
-type DialFunc func(network, address string) (net.Conn, error)
+type BackendDialer interface {
+	Dial(ctx context.Context, sourceIP, destIP string, destPort int) (net.Conn, error)
+}
+
 type ListenFunc func(network, address string) (net.Listener, error)
 type OriginalDstFunc func(conn net.Conn) (string, int, error)
 
@@ -30,14 +33,14 @@ type Router struct {
 	cfg         *config.ProxyConfig
 	assigner    Assigner
 	nat         NATManager
+	dialer      BackendDialer
 	logger      *slog.Logger
-	dial        DialFunc
 	listen      ListenFunc
 	originalDst OriginalDstFunc
 	backendByIP map[string]config.Server
 }
 
-func New(cfg *config.ProxyConfig, assigner Assigner, nat NATManager, logger *slog.Logger) *Router {
+func New(cfg *config.ProxyConfig, assigner Assigner, nat NATManager, dialer BackendDialer, logger *slog.Logger) *Router {
 	backendByIP := make(map[string]config.Server, len(cfg.Servers))
 	for _, server := range cfg.Servers {
 		backendByIP[server.ProxyPublicIP] = server
@@ -46,8 +49,8 @@ func New(cfg *config.ProxyConfig, assigner Assigner, nat NATManager, logger *slo
 		cfg:         cfg,
 		assigner:    assigner,
 		nat:         nat,
+		dialer:      dialer,
 		logger:      logger,
-		dial:        net.Dial,
 		listen:      net.Listen,
 		originalDst: origdst.Get,
 		backendByIP: backendByIP,
@@ -141,9 +144,9 @@ func (r *Router) handleConn(ctx context.Context, client net.Conn) {
 	}
 
 	backendAddr := net.JoinHostPort(server.BackendIP, strconv.Itoa(originalPort))
-	backend, err := r.dial("tcp", backendAddr)
+	backend, err := r.dialer.Dial(ctx, internalIP, server.BackendIP, originalPort)
 	if err != nil {
-		r.logger.Error("dial backend", "error", err, "backend", backendAddr, "server_name", server.Name)
+		r.logger.Error("dial backend", "error", err, "backend", backendAddr, "server_name", server.Name, "internal_ip", internalIP)
 		return
 	}
 	defer func() { _ = backend.Close() }()

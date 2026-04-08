@@ -5,7 +5,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"strconv"
 	"testing"
 	"time"
 
@@ -25,6 +24,13 @@ type fakeNAT struct {
 	deleted []string
 }
 
+type fakeDialer struct {
+	conn     net.Conn
+	sourceIP string
+	destIP   string
+	destPort int
+}
+
 func (f *fakeNAT) Add(_ context.Context, realIP, internalIP string) error {
 	f.added = append(f.added, realIP+"->"+internalIP)
 	return nil
@@ -33,6 +39,13 @@ func (f *fakeNAT) Add(_ context.Context, realIP, internalIP string) error {
 func (f *fakeNAT) Delete(_ context.Context, realIP string) error {
 	f.deleted = append(f.deleted, realIP)
 	return nil
+}
+
+func (f *fakeDialer) Dial(_ context.Context, sourceIP, destIP string, destPort int) (net.Conn, error) {
+	f.sourceIP = sourceIP
+	f.destIP = destIP
+	f.destPort = destPort
+	return f.conn, nil
 }
 
 func TestRouterForwardsTrafficAndCleansUpNAT(t *testing.T) {
@@ -77,25 +90,15 @@ func TestRouterForwardsTrafficAndCleansUpNAT(t *testing.T) {
 	}
 
 	nat := &fakeNAT{}
-	r := New(cfg, fakeAssigner{internalIP: "10.1.0.5"}, nat, slog.Default())
+	clientToBackend, backendToRouter := net.Pipe()
+	defer clientToBackend.Close()
+	defer backendToRouter.Close()
+
+	dialer := &fakeDialer{conn: backendToRouter}
+	r := New(cfg, fakeAssigner{internalIP: "10.1.0.5"}, nat, dialer, slog.Default())
 	r.listen = func(_, _ string) (net.Listener, error) { return routerLn, nil }
 	r.originalDst = func(_ net.Conn) (string, int, error) {
 		return "203.0.113.10", 25565, nil
-	}
-	r.dial = func(_, address string) (net.Conn, error) {
-		_, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, err
-		}
-		gotPort, err := strconv.Atoi(port)
-		if err != nil {
-			return nil, err
-		}
-		wantPort := 25565
-		if gotPort != wantPort {
-			t.Fatalf("dialed port = %d, want %d", gotPort, wantPort)
-		}
-		return net.Dial("tcp", backendLn.Addr().String())
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,6 +118,14 @@ func TestRouterForwardsTrafficAndCleansUpNAT(t *testing.T) {
 	if _, err := client.Write([]byte("ping")); err != nil {
 		t.Fatalf("client write: %v", err)
 	}
+
+	go func() {
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(clientToBackend, buf); err != nil {
+			return
+		}
+		_, _ = clientToBackend.Write([]byte("pong"))
+	}()
 
 	reply := make([]byte, 4)
 	if _, err := io.ReadFull(client, reply); err != nil {
@@ -142,5 +153,8 @@ func TestRouterForwardsTrafficAndCleansUpNAT(t *testing.T) {
 	}
 	if len(nat.deleted) != 1 {
 		t.Fatalf("nat deleted = %v, want one entry", nat.deleted)
+	}
+	if dialer.sourceIP != "10.1.0.5" || dialer.destIP != "127.0.0.1" || dialer.destPort != 25565 {
+		t.Fatalf("dial args = %s %s %d", dialer.sourceIP, dialer.destIP, dialer.destPort)
 	}
 }
