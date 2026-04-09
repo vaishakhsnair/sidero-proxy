@@ -30,10 +30,19 @@ func (ExecRunner) Run(ctx context.Context, script string) error {
 type NATManager struct {
 	mu     sync.Mutex
 	runner ScriptRunner
+	refs   map[string]natEntry
+}
+
+type natEntry struct {
+	internalIP string
+	refCount   int
 }
 
 func NewNATManager(runner ScriptRunner) *NATManager {
-	return &NATManager{runner: runner}
+	return &NATManager{
+		runner: runner,
+		refs:   make(map[string]natEntry),
+	}
 }
 
 func (m *NATManager) Ensure(ctx context.Context) error {
@@ -58,15 +67,48 @@ func (m *NATManager) Ensure(ctx context.Context) error {
 func (m *NATManager) Add(ctx context.Context, realIP, internalIP string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	entry, ok := m.refs[realIP]
+	if ok {
+		if entry.internalIP != internalIP {
+			return fmt.Errorf("nat entry for %s already exists with internal ip %s, cannot replace with %s while active", realIP, entry.internalIP, internalIP)
+		}
+		entry.refCount++
+		m.refs[realIP] = entry
+		return nil
+	}
+
 	script := fmt.Sprintf("add element ip mcproxy_nat nat_map { %s : %s }\n", realIP, internalIP)
-	return m.runner.Run(ctx, script)
+	if err := m.runner.Run(ctx, script); err != nil {
+		return err
+	}
+	m.refs[realIP] = natEntry{
+		internalIP: internalIP,
+		refCount:   1,
+	}
+	return nil
 }
 
 func (m *NATManager) Delete(ctx context.Context, realIP string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	entry, ok := m.refs[realIP]
+	if !ok {
+		return nil
+	}
+	if entry.refCount > 1 {
+		entry.refCount--
+		m.refs[realIP] = entry
+		return nil
+	}
+
 	script := fmt.Sprintf("delete element ip mcproxy_nat nat_map { %s }\n", realIP)
-	return ignoreMissing(m.runner.Run(ctx, script))
+	if err := ignoreMissing(m.runner.Run(ctx, script)); err != nil {
+		return err
+	}
+	delete(m.refs, realIP)
+	return nil
 }
 
 type ProxyRedirectManager struct {

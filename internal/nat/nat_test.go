@@ -35,6 +35,50 @@ func TestNATManagerEnsureScript(t *testing.T) {
 	}
 }
 
+func TestNATManagerRefCountsSameRealIP(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{}
+	manager := NewNATManager(runner)
+	if err := manager.Add(context.Background(), "1.2.3.4", "10.1.0.1"); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := manager.Add(context.Background(), "1.2.3.4", "10.1.0.1"); err != nil {
+		t.Fatalf("second Add() error = %v", err)
+	}
+	if len(runner.scripts) != 1 {
+		t.Fatalf("scripts after duplicate add = %d, want 1", len(runner.scripts))
+	}
+	if err := manager.Delete(context.Background(), "1.2.3.4"); err != nil {
+		t.Fatalf("first Delete() error = %v", err)
+	}
+	if len(runner.scripts) != 1 {
+		t.Fatalf("scripts after first delete = %d, want 1", len(runner.scripts))
+	}
+	if err := manager.Delete(context.Background(), "1.2.3.4"); err != nil {
+		t.Fatalf("second Delete() error = %v", err)
+	}
+	if len(runner.scripts) != 2 {
+		t.Fatalf("scripts after final delete = %d, want 2", len(runner.scripts))
+	}
+	if !strings.Contains(runner.scripts[1], "delete element ip mcproxy_nat nat_map { 1.2.3.4 }") {
+		t.Fatalf("final delete script = %q", runner.scripts[1])
+	}
+}
+
+func TestNATManagerRejectsConflictingInternalIP(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{}
+	manager := NewNATManager(runner)
+	if err := manager.Add(context.Background(), "1.2.3.4", "10.1.0.1"); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := manager.Add(context.Background(), "1.2.3.4", "10.1.0.2"); err == nil {
+		t.Fatal("second Add() error = nil, want conflict error")
+	}
+}
+
 func TestNodeDNATEnsureScript(t *testing.T) {
 	t.Parallel()
 
