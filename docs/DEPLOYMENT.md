@@ -129,6 +129,8 @@ Edit `.env` and set:
 - `REDIS_PASSWORD` to a real secret
 - optionally `VALKEY_IMAGE` or `VALKEY_DATA_VOLUME`
 
+The tracked default uses a pinned published Valkey tag rather than a floating `stable` tag.
+
 Start it:
 
 ```bash
@@ -147,6 +149,8 @@ Validate the running service:
 docker compose -f docker-compose.valkey.yml ps
 docker exec sidero-proxy-valkey valkey-cli -a "$REDIS_PASSWORD" ping
 ```
+
+If the host already has a local Redis/Valkey on `6379`, change `.env` to another port such as `6380` before starting the compose stack.
 
 If you prefer a host-side client instead:
 
@@ -433,6 +437,29 @@ Expected:
 - client succeeds
 - `nft list table ip mcproxy_node` shows the DNAT rule
 
+### Transparent-source path check
+
+The proxy does not dial backends from its Tailscale IP. It dials from the assigned internal identity, for example `10.1.0.10`.
+
+That means this test is not sufficient:
+
+```bash
+nc -vz 100.64.0.18 25551
+```
+
+because it uses the proxy host source IP, not the proxy-assigned internal identity.
+
+Use this instead on the proxy host to emulate the proxy dataplane more closely:
+
+```bash
+nc -s 10.1.0.10 -vz 100.64.0.18 25551
+```
+
+Expected:
+- success means subnet routing and ACLs allow the transparent-source path
+- timeout means the backend path is still blocked before the service replies
+- refusal means the packet arrived but nothing accepted it on the backend path
+
 ## 8. Operational Notes
 
 ### Redis/Valkey persistence
@@ -478,7 +505,158 @@ The implementation owns these tables:
 
 Do not place unrelated manual rules inside those managed chains unless you are prepared for them to be flushed by the application.
 
-## 9. Rollback
+## 9. Troubleshooting
+
+### Valkey image tag failure
+
+If Docker says:
+
+```text
+manifest for valkey/valkey:stable not found
+```
+
+use the pinned published tag already tracked in the repo:
+
+```env
+VALKEY_IMAGE=valkey/valkey:9.0.3
+```
+
+### Docker port already in use
+
+If Docker says:
+
+```text
+failed to bind host port ... 6379 ... address already in use
+```
+
+check whether the host already has Redis/Valkey running:
+
+```bash
+ss -ltnp | grep 6379
+```
+
+If another service already owns `6379`, do not stop it unless you know what depends on it. Use another port in `.env`, for example:
+
+```env
+REDIS_PORT=6380
+```
+
+and point both proxy and watcher configs at that port.
+
+### Config directory missing
+
+If install fails with:
+
+```text
+cannot create regular file '/etc/mcproxy/...': No such file or directory
+```
+
+create the config directory first:
+
+```bash
+install -d /etc/mcproxy
+```
+
+### Go version parsing error
+
+If your system Go toolchain rejects:
+
+```text
+invalid go version '1.23.0': must match format 1.23
+```
+
+your local Go is stricter about the `go.mod` version format. Use a newer Go toolchain or normalize the `go` directive to `1.23`.
+
+### Proxy can reach backend from host IP, but mcproxy still times out
+
+This is the most important operational pitfall.
+
+This test:
+
+```bash
+nc -vz 100.64.0.18 25551
+```
+
+only proves that `100.64.0.22 -> 100.64.0.18:25551` works.
+
+The proxy actually dials like:
+
+```text
+10.1.0.10 -> 100.64.0.18:25551
+```
+
+If that path times out, check all of these:
+
+```bash
+ip route get 10.1.0.10
+ip route show table 52
+tcpdump -ni tailscale0 'tcp port 25551 and host 10.1.0.10'
+```
+
+On the backend node, success requires:
+- `10.1.0.0/16` learned via Tailscale, not routed out the public NIC
+- backend node DNAT installed in `mcproxy_node`
+- ACLs allowing traffic from the proxy subnet to the backend node
+
+### Headscale route approval is not enough
+
+Even if Headscale shows the route as approved and served, the backend node must still:
+
+- run `tailscale up --accept-routes ...`
+- receive the route into table `52`
+- actually select `tailscale0` for `10.1.0.0/16`
+
+Useful checks:
+
+```bash
+tailscale debug prefs
+ip rule
+ip route show table 52
+ip route get 10.1.0.10
+```
+
+The correct result should look like traffic to `10.1.0.10` using `tailscale0`, not the public interface.
+
+### ACLs must allow proxy subnet traffic
+
+Approving and serving the subnet route is not enough by itself. Tailscale/Headscale ACLs must also allow traffic sourced from the proxy subnet.
+
+A scalable pattern is to reserve the full proxy subnet pool in ACL hosts, for example:
+
+```json
+"proxy-nets": "10.0.0.0/8"
+```
+
+and then allow both directions:
+
+```json
+{
+  "action": "accept",
+  "src": ["group:cidernet"],
+  "dst": ["proxy-nets:*"]
+},
+{
+  "action": "accept",
+  "src": ["proxy-nets"],
+  "dst": ["group:cidernet:*"]
+}
+```
+
+This avoids adding new ACLs for every future proxy subnet.
+
+### Watcher warnings for old banned public IPs
+
+If watcher logs contain warnings like:
+
+```text
+lookup reverse mapping for 41.92.99.132: redis: nil
+```
+
+that usually means `banned-ips.json` contains legacy public IP bans, not proxy-assigned internal identities like `10.1.x.x`.
+
+That warning is about identity promotion and does not by itself explain backend dial timeouts.
+
+## 10. Rollback
 
 To stop the system:
 
@@ -504,7 +682,7 @@ ip route del local 10.1.0.0/16 dev lo
 
 Replace the subnet with the actual one assigned to that proxy.
 
-## 10. Related Validation Artifacts
+## 11. Related Validation Artifacts
 
 The deployment advice above comes directly from the staged labs:
 - [01-range-intercept-routing.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/01-range-intercept-routing.md)
