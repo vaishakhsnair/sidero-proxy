@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/google/nftables"
 )
 
 type ScriptRunner interface {
@@ -30,6 +33,7 @@ func (ExecRunner) Run(ctx context.Context, script string) error {
 type NATManager struct {
 	mu     sync.Mutex
 	runner ScriptRunner
+	elems  ElementRunner
 	refs   map[string]natEntry
 }
 
@@ -38,9 +42,121 @@ type natEntry struct {
 	refCount   int
 }
 
+type ElementRunner interface {
+	Add(ctx context.Context, realIP, internalIP string) error
+	Delete(ctx context.Context, realIP string) error
+}
+
+type execElementRunner struct {
+	runner ScriptRunner
+}
+
+func (r execElementRunner) Add(ctx context.Context, realIP, internalIP string) error {
+	script := fmt.Sprintf("add element ip mcproxy_nat nat_map { %s : %s }\n", realIP, internalIP)
+	return r.runner.Run(ctx, script)
+}
+
+func (r execElementRunner) Delete(ctx context.Context, realIP string) error {
+	script := fmt.Sprintf("delete element ip mcproxy_nat nat_map { %s }\n", realIP)
+	return r.runner.Run(ctx, script)
+}
+
+type nativeElementRunner struct {
+	mu   sync.Mutex
+	conn *nftables.Conn
+	set  *nftables.Set
+}
+
+func newNativeElementRunner() *nativeElementRunner {
+	return &nativeElementRunner{
+		set: &nftables.Set{
+			Table: &nftables.Table{
+				Family: nftables.TableFamilyIPv4,
+				Name:   "mcproxy_nat",
+			},
+			Name: "nat_map",
+		},
+	}
+}
+
+func (r *nativeElementRunner) Add(ctx context.Context, realIP, internalIP string) error {
+	_ = ctx
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	realIPv4 := net.ParseIP(realIP).To4()
+	internalIPv4 := net.ParseIP(internalIP).To4()
+	if realIPv4 == nil || internalIPv4 == nil {
+		return fmt.Errorf("nat map requires ipv4 addresses, got real_ip=%q internal_ip=%q", realIP, internalIP)
+	}
+
+	conn, err := r.connection()
+	if err != nil {
+		return err
+	}
+
+	if err := conn.SetAddElements(r.set, []nftables.SetElement{{
+		Key: []byte(realIPv4),
+		Val: []byte(internalIPv4),
+	}}); err != nil {
+		return ignoreAlreadyExists(fmt.Errorf("native nft add element failed: %w", err))
+	}
+	if err := conn.Flush(); err != nil {
+		return ignoreAlreadyExists(fmt.Errorf("native nft flush add failed: %w", err))
+	}
+	return nil
+}
+
+func (r *nativeElementRunner) Delete(ctx context.Context, realIP string) error {
+	_ = ctx
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	realIPv4 := net.ParseIP(realIP).To4()
+	if realIPv4 == nil {
+		return fmt.Errorf("nat map requires ipv4 real_ip, got %q", realIP)
+	}
+
+	conn, err := r.connection()
+	if err != nil {
+		return err
+	}
+
+	if err := conn.SetDeleteElements(r.set, []nftables.SetElement{{
+		Key: []byte(realIPv4),
+	}}); err != nil {
+		return ignoreMissing(fmt.Errorf("native nft delete element failed: %w", err))
+	}
+	if err := conn.Flush(); err != nil {
+		return ignoreMissing(fmt.Errorf("native nft flush delete failed: %w", err))
+	}
+	return nil
+}
+
+func (r *nativeElementRunner) connection() (*nftables.Conn, error) {
+	if r.conn != nil {
+		return r.conn, nil
+	}
+	conn, err := nftables.New(nftables.AsLasting())
+	if err != nil {
+		return nil, fmt.Errorf("open nftables conn: %w", err)
+	}
+	r.conn = conn
+	return conn, nil
+}
+
 func NewNATManager(runner ScriptRunner) *NATManager {
 	return &NATManager{
 		runner: runner,
+		elems:  execElementRunner{runner: runner},
+		refs:   make(map[string]natEntry),
+	}
+}
+
+func NewNativeNATManager(runner ScriptRunner) *NATManager {
+	return &NATManager{
+		runner: runner,
+		elems:  newNativeElementRunner(),
 		refs:   make(map[string]natEntry),
 	}
 }
@@ -78,8 +194,7 @@ func (m *NATManager) Add(ctx context.Context, realIP, internalIP string) error {
 		return nil
 	}
 
-	script := fmt.Sprintf("add element ip mcproxy_nat nat_map { %s : %s }\n", realIP, internalIP)
-	if err := m.runner.Run(ctx, script); err != nil {
+	if err := m.elems.Add(ctx, realIP, internalIP); err != nil {
 		return err
 	}
 	m.refs[realIP] = natEntry{
@@ -103,8 +218,7 @@ func (m *NATManager) Delete(ctx context.Context, realIP string) error {
 		return nil
 	}
 
-	script := fmt.Sprintf("delete element ip mcproxy_nat nat_map { %s }\n", realIP)
-	if err := ignoreMissing(m.runner.Run(ctx, script)); err != nil {
+	if err := ignoreMissing(m.elems.Delete(ctx, realIP)); err != nil {
 		return err
 	}
 	delete(m.refs, realIP)

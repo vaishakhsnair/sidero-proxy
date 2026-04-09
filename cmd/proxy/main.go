@@ -50,7 +50,7 @@ func main() {
 		panic(fmt.Errorf("ensure local route for %s: %w", info.Subnet, err))
 	}
 
-	natManager := nat.NewNATManager(nat.ExecRunner{})
+	natManager := nat.NewNativeNATManager(nat.ExecRunner{})
 	if err := natManager.Ensure(ctx); err != nil {
 		panic(fmt.Errorf("ensure nftables nat rules: %w", err))
 	}
