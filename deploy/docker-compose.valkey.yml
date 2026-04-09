@@ -1,0 +1,36 @@
+services:
+  valkey:
+    image: ${VALKEY_IMAGE:-valkey/valkey:stable}
+    container_name: ${VALKEY_CONTAINER_NAME:-sidero-proxy-valkey}
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --bind
+      - 0.0.0.0
+      - --port
+      - "${REDIS_PORT:-6379}"
+      - --requirepass
+      - "${REDIS_PASSWORD}"
+      - --appendonly
+      - "yes"
+      - --save
+      - "60"
+      - "1000"
+    ports:
+      - "${REDIS_BIND_IP}:${REDIS_PORT:-6379}:${REDIS_PORT:-6379}"
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - valkey-cli -a "$$REDIS_PASSWORD" -p "${REDIS_PORT:-6379}" ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+volumes:
+  valkey-data:
+    name: ${VALKEY_DATA_VOLUME:-valkey-data}

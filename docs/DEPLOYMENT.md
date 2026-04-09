@@ -13,6 +13,8 @@ The runtime was validated in staged labs for:
 - watcher-driven cross-proxy identity propagation
 - node-side DNAT for containers published only on the node public IP
 - prefilter blocklist and SYN gate
+- same-real-IP concurrent connection safety through refcounted NAT lifecycle
+- native nftables runtime map updates without shelling out to `nft` on each flow event
 
 ## 1. What Must Exist
 
@@ -91,6 +93,64 @@ save 60 1000
 
 If it is remote, bind it only to the private interface you actually use.
 
+### Repo-standard Docker Compose
+
+The repo now includes a datastore-only compose deployment:
+
+- [docker-compose.valkey.yml](/home/onegrit/Documents/Projects/sidero-proxy/deploy/docker-compose.valkey.yml)
+- [.env.example](/home/onegrit/Documents/Projects/sidero-proxy/deploy/.env.example)
+
+This is the recommended quick-start if you want the datastore in Docker while keeping `mcproxy` and `mcwatcher` on the host.
+
+Setup:
+
+```bash
+cd deploy
+cp .env.example .env
+```
+
+Edit `.env` and set:
+
+- `REDIS_BIND_IP` to the host private IP that proxy and watcher will use
+- `REDIS_PASSWORD` to a real secret
+- optionally `VALKEY_IMAGE` or `VALKEY_DATA_VOLUME`
+
+Start it:
+
+```bash
+docker compose -f docker-compose.valkey.yml up -d
+```
+
+Validate the generated config:
+
+```bash
+docker compose -f docker-compose.valkey.yml config
+```
+
+Validate the running service:
+
+```bash
+docker compose -f docker-compose.valkey.yml ps
+docker exec sidero-proxy-valkey valkey-cli -a "$REDIS_PASSWORD" ping
+```
+
+If you prefer a host-side client instead:
+
+```bash
+redis-cli -h <REDIS_BIND_IP> -p 6379 -a <REDIS_PASSWORD> ping
+```
+
+Point the app configs at the same address:
+
+```json
+{
+  "redis_addr": "100.100.100.10:6379",
+  "redis_password": "change-me"
+}
+```
+
+That `redis_addr` / `redis_password` shape is already what both example configs use.
+
 ## 5. Proxy Host Setup
 
 ### Kernel and tooling
@@ -113,7 +173,7 @@ echo 'net.ipv4.ip_forward=1' >/etc/sysctl.d/99-mcproxy.conf
 
 `mcproxy` must run as root or equivalent because it needs to:
 - add nftables tables/chains/sets/rules
-- add/remove nftables NAT map elements
+- add/remove nftables NAT map elements through netlink
 - install a local route for its assigned `/16`
 - create transparent-source backend sockets with `IP_TRANSPARENT` and `IP_FREEBIND`
 
@@ -196,6 +256,11 @@ On startup, the proxy will:
   - `mcproxy_nat`
 - listen on `0.0.0.0:<intercept_port>`
 
+At runtime, the proxy then:
+- adds `mcproxy_nat:nat_map` elements through the native Go nftables client
+- refcounts live NAT state per real client IP
+- removes a NAT element only after the last live connection for that real IP closes
+
 ### What nftables objects the proxy owns
 
 The proxy manages only these dedicated tables:
@@ -206,6 +271,11 @@ The proxy manages only these dedicated tables:
 It does **not** delete unrelated host nftables tables.
 
 It does flush the mcproxy-owned chains/sets it recreates, so treat those tables as application-owned.
+
+Operationally:
+- startup provisioning still uses the `nft` CLI
+- per-connection NAT map updates do not shell out to `nft`
+- this split is intentional so the hot path is lighter while startup stays simple
 
 ## 6. Node Host Setup
 
@@ -302,6 +372,16 @@ Expected:
 - Redis contains `map:<real_ip>`
 - backend sees peer `10.<proxy-subnet>.*.*`, not the proxy public IP and not the host bridge/private IP
 
+### Same-IP concurrency check
+
+Open two TCP connections at the same time from the same client IP to the same proxy public IP and port.
+
+Expected:
+- both connections succeed
+- proxy logs the same `internal_ip` for both
+- backend sees both peers from the same assigned `10.x.x.x` identity
+- if one connection closes first, the other keeps working
+
 ### Watcher identity propagation check
 
 After a player has connected once through proxy A:
@@ -340,6 +420,15 @@ Subnets are assigned in registration order:
 - second gets `10.2.0.0/16`
 
 This matters when interpreting watcher-promoted mappings in a multi-proxy environment.
+
+### Concurrency target
+
+For your expected floor of `400+` concurrent players:
+- the refcounted NAT lifecycle is required so same-IP multi-connection traffic does not break itself
+- the proxy now avoids shelling out to `nft` on first-connect and last-disconnect events
+- startup still depends on nftables provisioning succeeding before traffic is accepted
+
+This does not mean the current build has been benchmarked to exactly `400+` live players in this repo. What has been validated is the functional behavior that was most likely to fail under that concurrency pattern.
 
 ### The watcher is not a proxy-side ban enforcer
 
@@ -393,3 +482,5 @@ The deployment advice above comes directly from the staged labs:
 - [03-watcher-cross-proxy-identity.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/03-watcher-cross-proxy-identity.md)
 - [04-node-dnat-range.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/04-node-dnat-range.md)
 - [05-prefilter-blocklist.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/05-prefilter-blocklist.md)
+- [06-refcounted-nat-lifecycle.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/06-refcounted-nat-lifecycle.md)
+- [07-native-nftables-hot-path.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/07-native-nftables-hot-path.md)
