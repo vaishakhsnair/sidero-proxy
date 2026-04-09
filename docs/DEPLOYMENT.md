@@ -72,6 +72,20 @@ GOCACHE=/tmp/go-build go build -o /usr/local/bin/mcwatcher ./cmd/watcher
 
 If you prefer, build to another path and update the service/unit files accordingly.
 
+Install the tracked systemd units if you are running `mcproxy` and `mcwatcher` directly on the host:
+
+```bash
+install -d /etc/mcproxy
+install -m 0644 deploy/mcproxy.service /etc/systemd/system/mcproxy.service
+install -m 0644 deploy/mcwatcher.service /etc/systemd/system/mcwatcher.service
+systemctl daemon-reload
+```
+
+Tracked unit files:
+
+- [mcproxy.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcproxy.service)
+- [mcwatcher.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcwatcher.service)
+
 ## 4. Redis Or Valkey Setup
 
 Any Redis-compatible server is fine. In my labs, the machine’s `redis-server` binary was actually Valkey and worked as a drop-in backend.
@@ -244,7 +258,8 @@ Meaning:
 ### Start proxy
 
 ```bash
-mcproxy -config /etc/mcproxy/config.json
+install -m 0644 deploy/config.example.json /etc/mcproxy/config.json
+systemctl enable --now mcproxy
 ```
 
 On startup, the proxy will:
@@ -260,6 +275,13 @@ At runtime, the proxy then:
 - adds `mcproxy_nat:nat_map` elements through the native Go nftables client
 - refcounts live NAT state per real client IP
 - removes a NAT element only after the last live connection for that real IP closes
+
+Inspect the service:
+
+```bash
+systemctl status mcproxy
+journalctl -u mcproxy -f
+```
 
 ### What nftables objects the proxy owns
 
@@ -329,12 +351,20 @@ Meaning:
 ### Start watcher
 
 ```bash
-mcwatcher -config /etc/mcproxy/watcher.json
+install -m 0644 deploy/watcher.example.json /etc/mcproxy/watcher.json
+systemctl enable --now mcwatcher
 ```
 
 The watcher must also run as root because it needs to:
 - install nftables `mcproxy_node`
 - read the ban files
+
+Inspect the service:
+
+```bash
+systemctl status mcwatcher
+journalctl -u mcwatcher -f
+```
 
 ## 7. Functional Verification
 
@@ -343,7 +373,7 @@ The watcher must also run as root because it needs to:
 On proxy host:
 
 ```bash
-mcproxy -config /etc/mcproxy/config.json
+systemctl status mcproxy
 ```
 
 Expect logs like:
@@ -453,8 +483,8 @@ Do not place unrelated manual rules inside those managed chains unless you are p
 To stop the system:
 
 ```bash
-pkill mcproxy || true
-pkill mcwatcher || true
+systemctl disable --now mcproxy || true
+systemctl disable --now mcwatcher || true
 ```
 
 To remove managed nftables state:

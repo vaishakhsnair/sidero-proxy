@@ -1,0 +1,16 @@
+[Unit]
+Description=Sidero Proxy Watcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/mcwatcher -config /etc/mcproxy/watcher.json
+Restart=always
+RestartSec=2s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

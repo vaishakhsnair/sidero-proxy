@@ -1,0 +1,16 @@
+[Unit]
+Description=Sidero Proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/mcproxy -config /etc/mcproxy/config.json
+Restart=always
+RestartSec=2s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
