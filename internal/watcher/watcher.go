@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/redis/go-redis/v9"
@@ -35,33 +36,42 @@ type BannedPlayerEntry struct {
 	Expires string `json:"expires"`
 }
 
+type dnatManager interface {
+	EnsureRange(ctx context.Context, publicIP, tailscaleInterface string, startPort, endPort int) error
+	EnsureDestinations(ctx context.Context, tailscaleInterface string, destinations map[int]nat.DNATDestination) error
+}
+
 type Service struct {
 	cfg        *config.WatcherConfig
 	logger     *slog.Logger
 	assigner   *assignment.Service
 	rdb        *redis.Client
-	dnat       *nat.NodeDNATManager
+	dnat       dnatManager
+	resolver   EndpointResolver
 	mu         sync.Mutex
 	ipSnapshot map[string]map[string]struct{}
 }
 
-func New(cfg *config.WatcherConfig, rdb *redis.Client, assigner *assignment.Service, dnat *nat.NodeDNATManager, logger *slog.Logger) *Service {
+func New(cfg *config.WatcherConfig, rdb *redis.Client, assigner *assignment.Service, dnat dnatManager, resolver EndpointResolver, logger *slog.Logger) *Service {
 	return &Service{
 		cfg:        cfg,
 		logger:     logger,
 		assigner:   assigner,
 		rdb:        rdb,
 		dnat:       dnat,
+		resolver:   resolver,
 		ipSnapshot: make(map[string]map[string]struct{}),
 	}
 }
 
 func (s *Service) Start(ctx context.Context) error {
 	if s.dnat != nil && s.cfg.NodeDNAT.PortRange.Start > 0 {
-		if err := s.dnat.EnsureRange(ctx, s.cfg.NodeDNAT.PublicIP, s.cfg.NodeDNAT.TailscaleInterface, s.cfg.NodeDNAT.PortRange.Start, s.cfg.NodeDNAT.PortRange.End); err != nil {
+		if err := s.ensureNodeDNAT(ctx); err != nil {
 			return fmt.Errorf("ensure node dnat: %w", err)
 		}
-		s.logger.Info("node dnat ensured", "public_ip", s.cfg.NodeDNAT.PublicIP, "tailscale_interface", s.cfg.NodeDNAT.TailscaleInterface)
+		if s.resolver != nil {
+			go s.watchDocker(ctx)
+		}
 	}
 
 	fsw, err := fsnotify.NewWatcher()
@@ -88,6 +98,50 @@ func (s *Service) Start(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (s *Service) watchDocker(ctx context.Context) {
+	triggerCh, errCh := s.resolver.Events(ctx)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-triggerCh:
+		case err, ok := <-errCh:
+			if ok && err != nil {
+				s.logger.Warn("docker events watcher exited", "error", err)
+			}
+			return
+		}
+
+		if err := s.ensureNodeDNAT(ctx); err != nil {
+			s.logger.Warn("reconcile node dnat", "error", err)
+		}
+	}
+}
+
+func (s *Service) ensureNodeDNAT(ctx context.Context) error {
+	if s.resolver != nil {
+		destinations, err := s.resolver.Resolve(ctx)
+		if err != nil {
+			return err
+		}
+		if err := s.dnat.EnsureDestinations(ctx, s.cfg.NodeDNAT.TailscaleInterface, destinations); err != nil {
+			return err
+		}
+		s.logger.Info("node dnat ensured", "tailscale_interface", s.cfg.NodeDNAT.TailscaleInterface, "container_targets", len(destinations))
+		return nil
+	}
+
+	if err := s.dnat.EnsureRange(ctx, s.cfg.NodeDNAT.PublicIP, s.cfg.NodeDNAT.TailscaleInterface, s.cfg.NodeDNAT.PortRange.Start, s.cfg.NodeDNAT.PortRange.End); err != nil {
+		return err
+	}
+	s.logger.Info("node dnat ensured", "public_ip", s.cfg.NodeDNAT.PublicIP, "tailscale_interface", s.cfg.NodeDNAT.TailscaleInterface)
+	return nil
 }
 
 func (s *Service) addWatches(fsw *fsnotify.Watcher) error {

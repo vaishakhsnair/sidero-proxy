@@ -115,6 +115,27 @@ func TestNodeDNATEnsureRangeScript(t *testing.T) {
 	}
 }
 
+func TestNodeDNATEnsureDestinationsScript(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{}
+	manager := NewNodeDNATManager(runner)
+	destinations := map[int]DNATDestination{
+		25566: {IP: "172.18.0.12", Port: 25565},
+		25565: {IP: "172.18.0.11", Port: 25565},
+	}
+	if err := manager.EnsureDestinations(context.Background(), "tailscale0", destinations); err != nil {
+		t.Fatalf("EnsureDestinations() error = %v", err)
+	}
+	if len(runner.scripts) != 5 {
+		t.Fatalf("scripts = %d, want 5", len(runner.scripts))
+	}
+	got := strings.Join(runner.scripts, "")
+	if !strings.Contains(got, `tcp dport 25565 dnat to 172.18.0.11:25565`) || !strings.Contains(got, `tcp dport 25566 dnat to 172.18.0.12:25565`) {
+		t.Fatalf("EnsureDestinations() script = %q", got)
+	}
+}
+
 func TestProxyRedirectEnsureScript(t *testing.T) {
 	t.Parallel()
 

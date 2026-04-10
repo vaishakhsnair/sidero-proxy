@@ -33,6 +33,7 @@ type ProxyConfig struct {
 type NodeDNATConfig struct {
 	PublicIP           string    `json:"public_ip"`
 	TailscaleInterface string    `json:"tailscale_interface"`
+	DockerNetwork      string    `json:"docker_network"`
 	PortRange          PortRange `json:"port_range"`
 }
 
@@ -219,6 +220,9 @@ func (c *WatcherConfig) Validate() error {
 		}
 		if strings.TrimSpace(c.NodeDNAT.TailscaleInterface) == "" {
 			return fmt.Errorf("node_dnat.tailscale_interface is required when node_dnat is configured")
+		}
+		if strings.TrimSpace(c.NodeDNAT.DockerNetwork) == "" {
+			c.NodeDNAT.DockerNetwork = "bridge"
 		}
 		if err := c.NodeDNAT.PortRange.Validate("node_dnat.port_range"); err != nil {
 			return err

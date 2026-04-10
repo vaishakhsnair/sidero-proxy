@@ -126,7 +126,10 @@ then traffic sent to the node Tailscale IP will not automatically hit the contai
 `mcwatcher` solves this by installing `mcproxy_node` DNAT rules:
 - packet arrives on `tailscale0`
 - destination is node Tailscale IP and game port
-- nftables rewrites destination to node public IP on the same port
+- watcher resolves the published port to the container bridge IP and port
+- nftables rewrites destination directly to the container endpoint
+
+This direct container DNAT is important. Rewriting to the node public IP would send the flow back through Docker's published-port NAT path, which can make the Minecraft server see the Docker bridge host IP instead of the assigned proxy identity.
 
 ### 3.4 Why proxy subnet routing matters
 
@@ -343,6 +346,9 @@ Important watcher fields:
   - node public IP where Docker published Minecraft ports
 - `node_dnat.tailscale_interface`
   - usually `tailscale0`
+- `node_dnat.docker_network`
+  - Docker network name used to resolve container bridge IPs
+  - defaults to `bridge`
 - `node_dnat.port_range`
 
 Install:

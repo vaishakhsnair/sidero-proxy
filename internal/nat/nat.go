@@ -281,6 +281,11 @@ type NodeDNATManager struct {
 	runner ScriptRunner
 }
 
+type DNATDestination struct {
+	IP   string
+	Port int
+}
+
 func NewNodeDNATManager(runner ScriptRunner) *NodeDNATManager {
 	return &NodeDNATManager{runner: runner}
 }
@@ -314,6 +319,35 @@ func (m *NodeDNATManager) EnsureRange(ctx context.Context, publicIP, tailscaleIn
 		ports = append(ports, port)
 	}
 	return m.Ensure(ctx, publicIP, tailscaleInterface, ports)
+}
+
+func (m *NodeDNATManager) EnsureDestinations(ctx context.Context, tailscaleInterface string, destinations map[int]DNATDestination) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ports := make([]int, 0, len(destinations))
+	for port := range destinations {
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add table ip mcproxy_node\n")); err != nil {
+		return err
+	}
+	if err := ignoreAlreadyExists(m.runner.Run(ctx, "add chain ip mcproxy_node prerouting { type nat hook prerouting priority dstnat; }\n")); err != nil {
+		return err
+	}
+	if err := m.runner.Run(ctx, "flush chain ip mcproxy_node prerouting\n"); err != nil {
+		return err
+	}
+	for _, port := range ports {
+		dst := destinations[port]
+		rule := fmt.Sprintf("add rule ip mcproxy_node prerouting iifname %q tcp dport %d dnat to %s:%d\n", tailscaleInterface, port, dst.IP, dst.Port)
+		if err := m.runner.Run(ctx, rule); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ignoreAlreadyExists(err error) error {

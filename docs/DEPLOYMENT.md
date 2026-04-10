@@ -357,7 +357,7 @@ Example:
 
 Meaning:
 - watcher watches `banned-ips.json` and `banned-players.json` under `volumes_root`
-- watcher installs `mcproxy_node` DNAT rules so traffic arriving on `tailscale0` to that port range is rewritten to `public_ip:same_port`
+- watcher installs `mcproxy_node` DNAT rules so traffic arriving on `tailscale0` to that port range is rewritten directly to the container bridge IP and port discovered from Docker
 
 ### Start watcher
 

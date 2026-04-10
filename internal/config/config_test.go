@@ -47,14 +47,18 @@ func TestLoadWatcherValidation(t *testing.T) {
 	data := []byte(`{
 		"redis_addr":"127.0.0.1:6379",
 		"volumes_root":"/tmp/volumes",
-		"node_dnat":{"public_ip":"167.235.15.102","port_range":{"start":25565,"end":25570}}
+		"node_dnat":{"public_ip":"167.235.15.102","tailscale_interface":"tailscale0","port_range":{"start":25565,"end":25570}}
 	}`)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write watcher config: %v", err)
 	}
 
-	if _, err := LoadWatcher(path); err == nil {
-		t.Fatal("LoadWatcher() error = nil, want validation error")
+	cfg, err := LoadWatcher(path)
+	if err != nil {
+		t.Fatalf("LoadWatcher() error = %v", err)
+	}
+	if cfg.NodeDNAT.DockerNetwork != "bridge" {
+		t.Fatalf("DockerNetwork = %q, want bridge", cfg.NodeDNAT.DockerNetwork)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"sidero-proxy/internal/assignment"
 	"sidero-proxy/internal/config"
+	"sidero-proxy/internal/nat"
 	"sidero-proxy/internal/registration"
 )
 
@@ -33,7 +34,7 @@ func TestPromoteIdentityReservesMappingsAcrossProxies(t *testing.T) {
 	mr.HSet("proxy:registry", "proxy-1", string(p1))
 	mr.HSet("proxy:registry", "proxy-2", string(p2))
 
-	service := New(&config.WatcherConfig{VolumesRoot: "/tmp"}, rdb, assigner, nil, slog.Default())
+	service := New(&config.WatcherConfig{VolumesRoot: "/tmp"}, rdb, assigner, nil, nil, slog.Default())
 	if err := service.promoteIdentity(ctx, BannedIPEntry{IP: "10.1.0.1"}); err != nil {
 		t.Fatalf("promoteIdentity() error = %v", err)
 	}
@@ -75,7 +76,7 @@ func TestHandleBannedIPsDetectsNewEntries(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	service := New(&config.WatcherConfig{VolumesRoot: dir}, rdb, assigner, nil, slog.Default())
+	service := New(&config.WatcherConfig{VolumesRoot: dir}, rdb, assigner, nil, nil, slog.Default())
 	if err := service.handleBannedIPs(ctx, serverDir); err != nil {
 		t.Fatalf("handleBannedIPs() error = %v", err)
 	}
@@ -86,5 +87,69 @@ func TestHandleBannedIPsDetectsNewEntries(t *testing.T) {
 	}
 	if mappings["proxy-2"] != "10.2.0.1" {
 		t.Fatalf("proxy-2 mapping = %q, want 10.2.0.1", mappings["proxy-2"])
+	}
+}
+
+type fakeResolver struct {
+	destinations map[int]nat.DNATDestination
+	err          error
+}
+
+func (f fakeResolver) Resolve(_ context.Context) (map[int]nat.DNATDestination, error) {
+	return f.destinations, f.err
+}
+
+func (f fakeResolver) Events(_ context.Context) (<-chan struct{}, <-chan error) {
+	triggerCh := make(chan struct{})
+	errCh := make(chan error)
+	close(triggerCh)
+	close(errCh)
+	return triggerCh, errCh
+}
+
+type fakeDNAT struct {
+	tailscaleInterface string
+	destinations       map[int]nat.DNATDestination
+}
+
+func (f *fakeDNAT) EnsureDestinations(_ context.Context, tailscaleInterface string, destinations map[int]nat.DNATDestination) error {
+	f.tailscaleInterface = tailscaleInterface
+	f.destinations = destinations
+	return nil
+}
+
+func (f *fakeDNAT) EnsureRange(_ context.Context, _ string, _ string, _, _ int) error {
+	return nil
+}
+
+func TestEnsureNodeDNATUsesResolvedContainerEndpoints(t *testing.T) {
+	t.Parallel()
+
+	service := New(&config.WatcherConfig{
+		VolumesRoot: "/tmp",
+		NodeDNAT: config.NodeDNATConfig{
+			PublicIP:           "167.235.15.102",
+			TailscaleInterface: "tailscale0",
+			DockerNetwork:      "bridge",
+			PortRange:          config.PortRange{Start: 25551, End: 25551},
+		},
+	}, nil, nil, &fakeDNAT{}, nil, slog.Default())
+
+	dnat := &fakeDNAT{}
+	service.dnat = dnat
+	service.resolver = fakeResolver{
+		destinations: map[int]nat.DNATDestination{
+			25551: {IP: "172.18.0.23", Port: 25551},
+		},
+	}
+	if err := service.ensureNodeDNAT(context.Background()); err != nil {
+		t.Fatalf("ensureNodeDNATWithManager() error = %v", err)
+	}
+	if dnat.tailscaleInterface != "tailscale0" {
+		t.Fatalf("tailscale interface = %q, want tailscale0", dnat.tailscaleInterface)
+	}
+	got := dnat.destinations[25551]
+	if got.IP != "172.18.0.23" || got.Port != 25551 {
+		t.Fatalf("destination = %+v, want 172.18.0.23:25551", got)
 	}
 }

@@ -5,6 +5,7 @@
   "node_dnat": {
     "public_ip": "167.235.15.102",
     "tailscale_interface": "tailscale0",
+    "docker_network": "bridge",
     "port_range": {
       "start": 25500,
       "end": 25600

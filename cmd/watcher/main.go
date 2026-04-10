@@ -37,7 +37,8 @@ func main() {
 
 	assigner := assignment.New(rdb, "", 0, 0)
 	dnatManager := nat.NewNodeDNATManager(nat.ExecRunner{})
-	service := watcher.New(cfg, rdb, assigner, dnatManager, logger)
+	resolver := watcher.NewDockerResolver(cfg.NodeDNAT.PublicIP, cfg.NodeDNAT.DockerNetwork, cfg.NodeDNAT.PortRange.Start, cfg.NodeDNAT.PortRange.End)
+	service := watcher.New(cfg, rdb, assigner, dnatManager, resolver, logger)
 	if err := service.Start(ctx); err != nil {
 		panic(fmt.Errorf("run watcher: %w", err))
 	}
