@@ -34,7 +34,7 @@ func TestPromoteIdentityReservesMappingsAcrossProxies(t *testing.T) {
 	mr.HSet("proxy:registry", "proxy-1", string(p1))
 	mr.HSet("proxy:registry", "proxy-2", string(p2))
 
-	service := New(&config.WatcherConfig{VolumesRoot: "/tmp"}, rdb, assigner, nil, nil, slog.Default())
+	service := New(&config.WatcherConfig{VolumesRoot: "/tmp"}, rdb, assigner, nil, nil, nil, slog.Default())
 	if err := service.promoteIdentity(ctx, BannedIPEntry{IP: "10.1.0.1"}); err != nil {
 		t.Fatalf("promoteIdentity() error = %v", err)
 	}
@@ -76,7 +76,7 @@ func TestHandleBannedIPsDetectsNewEntries(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	service := New(&config.WatcherConfig{VolumesRoot: dir}, rdb, assigner, nil, nil, slog.Default())
+	service := New(&config.WatcherConfig{VolumesRoot: dir}, rdb, assigner, nil, nil, nil, slog.Default())
 	if err := service.handleBannedIPs(ctx, serverDir); err != nil {
 		t.Fatalf("handleBannedIPs() error = %v", err)
 	}
@@ -91,12 +91,12 @@ func TestHandleBannedIPsDetectsNewEntries(t *testing.T) {
 }
 
 type fakeResolver struct {
-	destinations map[int]nat.DNATDestination
-	err          error
+	state ResolvedState
+	err   error
 }
 
-func (f fakeResolver) Resolve(_ context.Context) (map[int]nat.DNATDestination, error) {
-	return f.destinations, f.err
+func (f fakeResolver) Resolve(_ context.Context) (ResolvedState, error) {
+	return f.state, f.err
 }
 
 func (f fakeResolver) Events(_ context.Context) (<-chan struct{}, <-chan error) {
@@ -122,6 +122,15 @@ func (f *fakeDNAT) EnsureRange(_ context.Context, _ string, _ string, _, _ int) 
 	return nil
 }
 
+type fakeNoSNAT struct {
+	subnets []string
+}
+
+func (f *fakeNoSNAT) Ensure(_ context.Context, bridgeSubnets []string) error {
+	f.subnets = append([]string(nil), bridgeSubnets...)
+	return nil
+}
+
 func TestEnsureNodeDNATUsesResolvedContainerEndpoints(t *testing.T) {
 	t.Parallel()
 
@@ -133,13 +142,18 @@ func TestEnsureNodeDNATUsesResolvedContainerEndpoints(t *testing.T) {
 			DockerNetwork:      "bridge",
 			PortRange:          config.PortRange{Start: 25551, End: 25551},
 		},
-	}, nil, nil, &fakeDNAT{}, nil, slog.Default())
+	}, nil, nil, &fakeDNAT{}, &fakeNoSNAT{}, nil, slog.Default())
 
 	dnat := &fakeDNAT{}
 	service.dnat = dnat
+	nosnat := &fakeNoSNAT{}
+	service.nosnat = nosnat
 	service.resolver = fakeResolver{
-		destinations: map[int]nat.DNATDestination{
-			25551: {IP: "172.18.0.23", Port: 25551},
+		state: ResolvedState{
+			Destinations: map[int]nat.DNATDestination{
+				25551: {IP: "172.18.0.23", Port: 25551},
+			},
+			BridgeSubnets: []string{"172.18.0.0/16"},
 		},
 	}
 	if err := service.ensureNodeDNAT(context.Background()); err != nil {
@@ -151,5 +165,8 @@ func TestEnsureNodeDNATUsesResolvedContainerEndpoints(t *testing.T) {
 	got := dnat.destinations[25551]
 	if got.IP != "172.18.0.23" || got.Port != 25551 {
 		t.Fatalf("destination = %+v, want 172.18.0.23:25551", got)
+	}
+	if len(nosnat.subnets) != 1 || nosnat.subnets[0] != "172.18.0.0/16" {
+		t.Fatalf("nosnat subnets = %#v, want 172.18.0.0/16", nosnat.subnets)
 	}
 }

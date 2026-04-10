@@ -41,24 +41,30 @@ type dnatManager interface {
 	EnsureDestinations(ctx context.Context, tailscaleInterface string, destinations map[int]nat.DNATDestination) error
 }
 
+type noSNATManager interface {
+	Ensure(ctx context.Context, bridgeSubnets []string) error
+}
+
 type Service struct {
 	cfg        *config.WatcherConfig
 	logger     *slog.Logger
 	assigner   *assignment.Service
 	rdb        *redis.Client
 	dnat       dnatManager
+	nosnat     noSNATManager
 	resolver   EndpointResolver
 	mu         sync.Mutex
 	ipSnapshot map[string]map[string]struct{}
 }
 
-func New(cfg *config.WatcherConfig, rdb *redis.Client, assigner *assignment.Service, dnat dnatManager, resolver EndpointResolver, logger *slog.Logger) *Service {
+func New(cfg *config.WatcherConfig, rdb *redis.Client, assigner *assignment.Service, dnat dnatManager, nosnat noSNATManager, resolver EndpointResolver, logger *slog.Logger) *Service {
 	return &Service{
 		cfg:        cfg,
 		logger:     logger,
 		assigner:   assigner,
 		rdb:        rdb,
 		dnat:       dnat,
+		nosnat:     nosnat,
 		resolver:   resolver,
 		ipSnapshot: make(map[string]map[string]struct{}),
 	}
@@ -126,14 +132,19 @@ func (s *Service) watchDocker(ctx context.Context) {
 
 func (s *Service) ensureNodeDNAT(ctx context.Context) error {
 	if s.resolver != nil {
-		destinations, err := s.resolver.Resolve(ctx)
+		state, err := s.resolver.Resolve(ctx)
 		if err != nil {
 			return err
 		}
-		if err := s.dnat.EnsureDestinations(ctx, s.cfg.NodeDNAT.TailscaleInterface, destinations); err != nil {
+		if err := s.dnat.EnsureDestinations(ctx, s.cfg.NodeDNAT.TailscaleInterface, state.Destinations); err != nil {
 			return err
 		}
-		s.logger.Info("node dnat ensured", "tailscale_interface", s.cfg.NodeDNAT.TailscaleInterface, "container_targets", len(destinations))
+		if s.nosnat != nil {
+			if err := s.nosnat.Ensure(ctx, state.BridgeSubnets); err != nil {
+				return err
+			}
+		}
+		s.logger.Info("node dnat ensured", "tailscale_interface", s.cfg.NodeDNAT.TailscaleInterface, "container_targets", len(state.Destinations), "bridge_subnets", fmt.Sprintf("%v", state.BridgeSubnets))
 		return nil
 	}
 
