@@ -1,0 +1,38 @@
+{
+  "cloudflare": {
+    "api_token": "change-me",
+    "zone_id": "change-me"
+  },
+  "fallback_region": "sg",
+  "probe_interval_seconds": 10,
+  "failback_window_seconds": 60,
+  "regions": [
+    {
+      "name": "us",
+      "health_url": "http://198.51.100.10:18080/healthz",
+      "answer_ips": ["198.51.100.10"]
+    },
+    {
+      "name": "eu",
+      "health_url": "http://203.0.113.10:18080/healthz",
+      "answer_ips": ["203.0.113.10"]
+    },
+    {
+      "name": "sg",
+      "health_url": "http://192.0.2.10:18080/healthz",
+      "answer_ips": ["192.0.2.10"]
+    }
+  ],
+  "hostnames": [
+    {
+      "name": "server1.example.com",
+      "region": "us",
+      "ttl": 60
+    },
+    {
+      "name": "server2.example.com",
+      "region": "eu",
+      "ttl": 60
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"sidero-proxy/internal/config"
+	"sidero-proxy/internal/minecraft"
 )
 
 type fakeAssigner struct {
@@ -81,10 +83,12 @@ func TestRouterForwardsTrafficAndCleansUpNAT(t *testing.T) {
 		RedisAddr:     "unused",
 		IPTTLSeconds:  60,
 		InterceptPort: 19000,
+		HealthPort:    18080,
 		PortRange:     config.PortRange{Start: 25565, End: 25565},
 		Servers: []config.Server{{
 			Name:          "node-a",
 			ProxyPublicIP: "203.0.113.10",
+			Hostnames:     []string{"ingress-1.sidero.net"},
 			BackendIP:     "127.0.0.1",
 		}},
 	}
@@ -115,13 +119,18 @@ func TestRouterForwardsTrafficAndCleansUpNAT(t *testing.T) {
 	}
 	defer client.Close()
 
-	if _, err := client.Write([]byte("ping")); err != nil {
+	payload := append(buildHandshakePacket("ingress-1.sidero.net", 25565), []byte("ping")...)
+	if _, err := client.Write(payload); err != nil {
 		t.Fatalf("client write: %v", err)
 	}
 
 	go func() {
-		buf := make([]byte, 4)
+		buf := make([]byte, len(payload))
 		if _, err := io.ReadFull(clientToBackend, buf); err != nil {
+			return
+		}
+		if !bytes.Equal(buf[:len(payload)-4], payload[:len(payload)-4]) {
+			t.Errorf("backend handshake mismatch")
 			return
 		}
 		_, _ = clientToBackend.Write([]byte("pong"))
@@ -157,4 +166,106 @@ func TestRouterForwardsTrafficAndCleansUpNAT(t *testing.T) {
 	if dialer.sourceIP != "10.1.0.5" || dialer.destIP != "127.0.0.1" || dialer.destPort != 25565 {
 		t.Fatalf("dial args = %s %s %d", dialer.sourceIP, dialer.destIP, dialer.destPort)
 	}
+}
+
+func TestRouterFallsBackToOriginalIPForLegacyRawIPConnects(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.ProxyConfig{
+		ProxyID:       "proxy-1",
+		RedisAddr:     "unused",
+		IPTTLSeconds:  60,
+		InterceptPort: 19000,
+		HealthPort:    18080,
+		PortRange:     config.PortRange{Start: 25565, End: 25565},
+		Servers: []config.Server{{
+			Name:          "node-a",
+			ProxyPublicIP: "203.0.113.10",
+			Hostnames:     []string{"ingress-1.sidero.net"},
+			BackendIP:     "127.0.0.1",
+		}},
+	}
+
+	nat := &fakeNAT{}
+	clientToBackend, backendToRouter := net.Pipe()
+	defer clientToBackend.Close()
+	defer backendToRouter.Close()
+
+	dialer := &fakeDialer{conn: backendToRouter}
+	r := New(cfg, fakeAssigner{internalIP: "10.1.0.5"}, nat, dialer, slog.Default())
+	server, routeKey, routeType, ok := r.resolveServer(mustHandshake(t, "203.0.113.10", 25565), nil, "203.0.113.10", 25565)
+	if !ok {
+		t.Fatal("resolveServer() = not ok, want fallback route")
+	}
+	if routeType != "original_ip_fallback" || routeKey != "203.0.113.10" || server.Name != "node-a" {
+		t.Fatalf("route = (%s, %s, %+v), want original_ip_fallback to node-a", routeType, routeKey, server)
+	}
+}
+
+func TestRouterRejectsUnknownHostname(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.ProxyConfig{
+		ProxyID:       "proxy-1",
+		RedisAddr:     "unused",
+		IPTTLSeconds:  60,
+		InterceptPort: 19000,
+		HealthPort:    18080,
+		PortRange:     config.PortRange{Start: 25565, End: 25565},
+		Servers: []config.Server{{
+			Name:          "node-a",
+			ProxyPublicIP: "203.0.113.10",
+			Hostnames:     []string{"ingress-1.sidero.net"},
+			BackendIP:     "127.0.0.1",
+		}},
+	}
+
+	r := New(cfg, fakeAssigner{internalIP: "10.1.0.5"}, &fakeNAT{}, &fakeDialer{}, slog.Default())
+	_, routeKey, routeType, ok := r.resolveServer(mustHandshake(t, "guessed-ingress.sidero.net", 25565), nil, "203.0.113.10", 25565)
+	if ok {
+		t.Fatal("resolveServer() = ok, want rejection")
+	}
+	if routeType != "unknown_hostname" || routeKey != "guessed-ingress.sidero.net" {
+		t.Fatalf("route = (%s, %s), want unknown hostname", routeType, routeKey)
+	}
+}
+
+func mustHandshake(t *testing.T, host string, port int) minecraft.Handshake {
+	t.Helper()
+	raw, handshake, err := minecraft.ReadHandshakePacket(bytes.NewReader(buildHandshakePacket(host, port)))
+	if err != nil || len(raw) == 0 {
+		t.Fatalf("ReadHandshakePacket() error = %v", err)
+	}
+	return handshake
+}
+
+func buildHandshakePacket(host string, port int) []byte {
+	body := make([]byte, 0, 64)
+	body = append(body, encodeVarInt(0)...)
+	body = append(body, encodeVarInt(769)...)
+	body = append(body, encodeString(host)...)
+	body = append(body, byte(port>>8), byte(port))
+	body = append(body, encodeVarInt(2)...)
+	return append(encodeVarInt(len(body)), body...)
+}
+
+func encodeString(value string) []byte {
+	raw := []byte(value)
+	return append(encodeVarInt(len(raw)), raw...)
+}
+
+func encodeVarInt(value int) []byte {
+	if value == 0 {
+		return []byte{0}
+	}
+	buf := make([]byte, 0, 5)
+	for value != 0 {
+		temp := byte(value & 0x7F)
+		value >>= 7
+		if value != 0 {
+			temp |= 0x80
+		}
+		buf = append(buf, temp)
+	}
+	return buf
 }

@@ -8,9 +8,10 @@ import (
 )
 
 type Server struct {
-	Name          string `json:"name"`
-	ProxyPublicIP string `json:"proxy_public_ip"`
-	BackendIP     string `json:"backend_ip"`
+	Name          string   `json:"name"`
+	ProxyPublicIP string   `json:"proxy_public_ip"`
+	Hostnames     []string `json:"hostnames"`
+	BackendIP     string   `json:"backend_ip"`
 }
 
 type PortRange struct {
@@ -24,6 +25,7 @@ type ProxyConfig struct {
 	RedisPassword string    `json:"redis_password"`
 	IPTTLSeconds  int       `json:"ip_ttl_seconds"`
 	InterceptPort int       `json:"intercept_port"`
+	HealthPort    int       `json:"health_port"`
 	PortRange     PortRange `json:"port_range"`
 	Servers       []Server  `json:"servers"`
 }
@@ -39,6 +41,32 @@ type WatcherConfig struct {
 	RedisPassword string         `json:"redis_password"`
 	VolumesRoot   string         `json:"volumes_root"`
 	NodeDNAT      NodeDNATConfig `json:"node_dnat"`
+}
+
+type FailoverRegion struct {
+	Name      string   `json:"name"`
+	HealthURL string   `json:"health_url"`
+	AnswerIPs []string `json:"answer_ips"`
+}
+
+type FailoverHostname struct {
+	Name   string `json:"name"`
+	Region string `json:"region"`
+	TTL    int    `json:"ttl"`
+}
+
+type FailoverCloudflare struct {
+	APIToken string `json:"api_token"`
+	ZoneID   string `json:"zone_id"`
+}
+
+type FailoverConfig struct {
+	Cloudflare            FailoverCloudflare `json:"cloudflare"`
+	FallbackRegion        string             `json:"fallback_region"`
+	ProbeIntervalSeconds  int                `json:"probe_interval_seconds"`
+	FailbackWindowSeconds int                `json:"failback_window_seconds"`
+	Regions               []FailoverRegion   `json:"regions"`
+	Hostnames             []FailoverHostname `json:"hostnames"`
 }
 
 func LoadProxy(path string) (*ProxyConfig, error) {
@@ -63,6 +91,17 @@ func LoadWatcher(path string) (*WatcherConfig, error) {
 	return &cfg, nil
 }
 
+func LoadFailover(path string) (*FailoverConfig, error) {
+	var cfg FailoverConfig
+	if err := loadJSON(path, &cfg); err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 func (c *ProxyConfig) Validate() error {
 	if strings.TrimSpace(c.ProxyID) == "" {
 		return fmt.Errorf("proxy_id is required")
@@ -76,19 +115,93 @@ func (c *ProxyConfig) Validate() error {
 	if c.InterceptPort <= 0 || c.InterceptPort > 65535 {
 		return fmt.Errorf("intercept_port must be between 1 and 65535")
 	}
+	if c.HealthPort <= 0 || c.HealthPort > 65535 {
+		return fmt.Errorf("health_port must be between 1 and 65535")
+	}
+	if c.HealthPort == c.InterceptPort {
+		return fmt.Errorf("health_port must differ from intercept_port")
+	}
 	if err := c.PortRange.Validate("port_range"); err != nil {
 		return err
 	}
+	hasIngressIP := false
 	for i, server := range c.Servers {
-		if strings.TrimSpace(server.ProxyPublicIP) == "" {
-			return fmt.Errorf("servers[%d].proxy_public_ip is required", i)
+		if strings.TrimSpace(server.ProxyPublicIP) != "" {
+			hasIngressIP = true
+		}
+		if strings.TrimSpace(server.ProxyPublicIP) == "" && len(server.Hostnames) == 0 {
+			return fmt.Errorf("servers[%d] must define proxy_public_ip or hostnames", i)
+		}
+		for j, hostname := range server.Hostnames {
+			if strings.TrimSpace(hostname) == "" {
+				return fmt.Errorf("servers[%d].hostnames[%d] must not be empty", i, j)
+			}
 		}
 		if strings.TrimSpace(server.BackendIP) == "" {
 			return fmt.Errorf("servers[%d].backend_ip is required", i)
 		}
 	}
+	if !hasIngressIP {
+		return fmt.Errorf("at least one servers[].proxy_public_ip is required")
+	}
 	if c.IPTTLSeconds < 0 {
 		return fmt.Errorf("ip_ttl_seconds cannot be negative")
+	}
+	return nil
+}
+
+func (c *FailoverConfig) Validate() error {
+	if strings.TrimSpace(c.Cloudflare.APIToken) == "" {
+		return fmt.Errorf("cloudflare.api_token is required")
+	}
+	if strings.TrimSpace(c.Cloudflare.ZoneID) == "" {
+		return fmt.Errorf("cloudflare.zone_id is required")
+	}
+	if strings.TrimSpace(c.FallbackRegion) == "" {
+		return fmt.Errorf("fallback_region is required")
+	}
+	if c.ProbeIntervalSeconds <= 0 {
+		return fmt.Errorf("probe_interval_seconds must be greater than zero")
+	}
+	if c.FailbackWindowSeconds < 0 {
+		return fmt.Errorf("failback_window_seconds cannot be negative")
+	}
+	if len(c.Regions) == 0 {
+		return fmt.Errorf("at least one region is required")
+	}
+	if len(c.Hostnames) == 0 {
+		return fmt.Errorf("at least one hostname is required")
+	}
+
+	regionNames := make(map[string]struct{}, len(c.Regions))
+	for i, region := range c.Regions {
+		if strings.TrimSpace(region.Name) == "" {
+			return fmt.Errorf("regions[%d].name is required", i)
+		}
+		if strings.TrimSpace(region.HealthURL) == "" {
+			return fmt.Errorf("regions[%d].health_url is required", i)
+		}
+		if len(region.AnswerIPs) == 0 {
+			return fmt.Errorf("regions[%d].answer_ips must not be empty", i)
+		}
+		regionNames[region.Name] = struct{}{}
+	}
+	if _, ok := regionNames[c.FallbackRegion]; !ok {
+		return fmt.Errorf("fallback_region %q is not defined in regions", c.FallbackRegion)
+	}
+	for i, hostname := range c.Hostnames {
+		if strings.TrimSpace(hostname.Name) == "" {
+			return fmt.Errorf("hostnames[%d].name is required", i)
+		}
+		if strings.TrimSpace(hostname.Region) == "" {
+			return fmt.Errorf("hostnames[%d].region is required", i)
+		}
+		if _, ok := regionNames[hostname.Region]; !ok {
+			return fmt.Errorf("hostnames[%d].region %q is not defined in regions", i, hostname.Region)
+		}
+		if hostname.TTL < 1 {
+			return fmt.Errorf("hostnames[%d].ttl must be greater than zero", i)
+		}
 	}
 	return nil
 }

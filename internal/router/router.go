@@ -6,10 +6,13 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"sidero-proxy/internal/config"
 	"sidero-proxy/internal/forwarder"
+	"sidero-proxy/internal/minecraft"
 	"sidero-proxy/internal/origdst"
 )
 
@@ -30,31 +33,44 @@ type ListenFunc func(network, address string) (net.Listener, error)
 type OriginalDstFunc func(conn net.Conn) (string, int, error)
 
 type Router struct {
-	cfg         *config.ProxyConfig
-	assigner    Assigner
-	nat         NATManager
-	dialer      BackendDialer
-	logger      *slog.Logger
-	listen      ListenFunc
-	originalDst OriginalDstFunc
-	backendByIP map[string]config.Server
+	cfg               *config.ProxyConfig
+	assigner          Assigner
+	nat               NATManager
+	dialer            BackendDialer
+	logger            *slog.Logger
+	listen            ListenFunc
+	originalDst       OriginalDstFunc
+	backendByIP       map[string]config.Server
+	backendByHostname map[string]config.Server
+	onReady           func(bool)
 }
 
 func New(cfg *config.ProxyConfig, assigner Assigner, nat NATManager, dialer BackendDialer, logger *slog.Logger) *Router {
 	backendByIP := make(map[string]config.Server, len(cfg.Servers))
+	backendByHostname := make(map[string]config.Server)
 	for _, server := range cfg.Servers {
-		backendByIP[server.ProxyPublicIP] = server
+		if server.ProxyPublicIP != "" {
+			backendByIP[server.ProxyPublicIP] = server
+		}
+		for _, hostname := range server.Hostnames {
+			backendByHostname[minecraft.NormalizeHostname(hostname)] = server
+		}
 	}
 	return &Router{
-		cfg:         cfg,
-		assigner:    assigner,
-		nat:         nat,
-		dialer:      dialer,
-		logger:      logger,
-		listen:      net.Listen,
-		originalDst: origdst.Get,
-		backendByIP: backendByIP,
+		cfg:               cfg,
+		assigner:          assigner,
+		nat:               nat,
+		dialer:            dialer,
+		logger:            logger,
+		listen:            net.Listen,
+		originalDst:       origdst.Get,
+		backendByIP:       backendByIP,
+		backendByHostname: backendByHostname,
 	}
+}
+
+func (r *Router) SetReadyHook(fn func(bool)) {
+	r.onReady = fn
 }
 
 func (r *Router) Start(ctx context.Context) error {
@@ -64,6 +80,10 @@ func (r *Router) Start(ctx context.Context) error {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	r.logger.Info("intercept listener started", "listen_addr", addr, "range_start", r.cfg.PortRange.Start, "range_end", r.cfg.PortRange.End, "public_ip_mappings", len(r.cfg.Servers))
+	if r.onReady != nil {
+		r.onReady(true)
+		defer r.onReady(false)
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -137,9 +157,14 @@ func (r *Router) handleConn(ctx context.Context, client net.Conn) {
 		return
 	}
 
-	server, ok := r.backendByIP[originalIP]
+	handshakeBytes, handshake, handshakeErr := r.readHandshake(client)
+	server, routeKey, routeType, ok := r.resolveServer(handshake, handshakeErr, originalIP, originalPort)
 	if !ok {
-		r.logger.Error("no backend mapping for original destination", "original_ip", originalIP, "original_port", originalPort)
+		if handshakeErr != nil {
+			r.logger.Warn("reject connection with invalid minecraft handshake", "error", handshakeErr, "real_ip", realIP, "original_ip", originalIP, "original_port", originalPort)
+			return
+		}
+		r.logger.Warn("reject connection with unknown ingress hostname", "hostname", handshake.Hostname, "real_ip", realIP, "original_ip", originalIP, "original_port", originalPort)
 		return
 	}
 
@@ -151,6 +176,58 @@ func (r *Router) handleConn(ctx context.Context, client net.Conn) {
 	}
 	defer func() { _ = backend.Close() }()
 
-	r.logger.Info("connection established", "server_name", server.Name, "real_ip", realIP, "internal_ip", internalIP, "original_ip", originalIP, "original_port", originalPort, "backend", backendAddr)
+	if len(handshakeBytes) > 0 {
+		if _, err := backend.Write(handshakeBytes); err != nil {
+			r.logger.Error("forward initial handshake", "error", err, "server_name", server.Name, "backend", backendAddr)
+			return
+		}
+	}
+
+	r.logger.Info("connection established", "server_name", server.Name, "real_ip", realIP, "internal_ip", internalIP, "original_ip", originalIP, "original_port", originalPort, "route_type", routeType, "route_key", routeKey, "backend", backendAddr)
 	forwarder.Proxy(client, backend)
+}
+
+func (r *Router) readHandshake(client net.Conn) ([]byte, minecraft.Handshake, error) {
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer func() { _ = client.SetReadDeadline(time.Time{}) }()
+	return minecraft.ReadHandshakePacket(client)
+}
+
+func (r *Router) resolveServer(handshake minecraft.Handshake, handshakeErr error, originalIP string, originalPort int) (config.Server, string, string, bool) {
+	if handshakeErr == nil {
+		if server, ok := r.backendByHostname[handshake.Hostname]; ok {
+			return server, handshake.Hostname, "hostname", true
+		}
+		if shouldFallbackToOriginalIP(handshake.Hostname, originalIP) {
+			if server, ok := r.backendByIP[originalIP]; ok {
+				return server, originalIP, "original_ip_fallback", true
+			}
+		}
+		return config.Server{}, handshake.Hostname, "unknown_hostname", false
+	}
+
+	server, ok := r.backendByIP[originalIP]
+	if !ok {
+		r.logger.Error("no backend mapping for original destination", "original_ip", originalIP, "original_port", originalPort)
+		return config.Server{}, originalIP, "original_ip", false
+	}
+	return server, originalIP, "original_ip", true
+}
+
+func shouldFallbackToOriginalIP(hostname, originalIP string) bool {
+	if hostname == "" {
+		return true
+	}
+	if ip := normalizeIPLikeHost(hostname); ip != "" {
+		return ip == originalIP
+	}
+	return false
+}
+
+func normalizeIPLikeHost(hostname string) string {
+	trimmed := strings.Trim(hostname, "[]")
+	if ip := net.ParseIP(trimmed); ip != nil {
+		return ip.String()
+	}
+	return ""
 }

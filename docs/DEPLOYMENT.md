@@ -5,6 +5,7 @@ This guide explains how to deploy the current `mcproxy` implementation based on 
 The implementation currently consists of:
 - `cmd/proxy`: public ingress proxy
 - `cmd/watcher`: ban-file watcher and node-side DNAT helper
+- `cmd/dnsfailover`: Cloudflare DNS failover controller for regional proxy failover
 
 The runtime was validated in staged labs for:
 - port-range interception
@@ -68,16 +69,18 @@ From repo root:
 GOCACHE=/tmp/go-build go test ./...
 GOCACHE=/tmp/go-build go build -o /usr/local/bin/mcproxy ./cmd/proxy
 GOCACHE=/tmp/go-build go build -o /usr/local/bin/mcwatcher ./cmd/watcher
+GOCACHE=/tmp/go-build go build -o /usr/local/bin/dnsfailover ./cmd/dnsfailover
 ```
 
 If you prefer, build to another path and update the service/unit files accordingly.
 
-Install the tracked systemd units if you are running `mcproxy` and `mcwatcher` directly on the host:
+Install the tracked systemd units if you are running the services directly on the host:
 
 ```bash
 install -d /etc/mcproxy
 install -m 0644 deploy/mcproxy.service /etc/systemd/system/mcproxy.service
 install -m 0644 deploy/mcwatcher.service /etc/systemd/system/mcwatcher.service
+install -m 0644 deploy/dnsfailover.service /etc/systemd/system/dnsfailover.service
 systemctl daemon-reload
 ```
 
@@ -85,6 +88,7 @@ Tracked unit files:
 
 - [mcproxy.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcproxy.service)
 - [mcwatcher.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcwatcher.service)
+- [dnsfailover.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/dnsfailover.service)
 
 ## 4. Redis Or Valkey Setup
 
@@ -234,6 +238,7 @@ Example:
   "redis_password": "change-me",
   "ip_ttl_seconds": 604800,
   "intercept_port": 19000,
+  "health_port": 18080,
   "port_range": {
     "start": 25500,
     "end": 25600
@@ -258,6 +263,7 @@ Meaning:
 - `port_range` is the external range to intercept
 - the original destination port is preserved when dialing the backend
 - `intercept_port` is the internal listener port used after nftables `redirect`
+- `health_port` serves `/healthz` for proxy-ingress health checks
 
 ### Start proxy
 
@@ -285,6 +291,7 @@ Inspect the service:
 ```bash
 systemctl status mcproxy
 journalctl -u mcproxy -f
+curl -fsS http://127.0.0.1:18080/healthz
 ```
 
 ### What nftables objects the proxy owns
@@ -370,7 +377,40 @@ systemctl status mcwatcher
 journalctl -u mcwatcher -f
 ```
 
-## 7. Functional Verification
+## 7. DNS Failover Controller Setup
+
+Use the DNS failover controller if you want regional proxy hostnames to fall back to SG automatically without paying for Cloudflare Load Balancing.
+
+Start from [failover.example.json](/home/onegrit/Documents/Projects/sidero-proxy/deploy/failover.example.json).
+
+The controller:
+- probes a dedicated proxy health URL per region
+- treats health as proxy-ingress health, not customer backend health
+- updates Cloudflare `A` records for server ingress hostnames
+- fails whole regions over to SG, not individual customer servers
+- automatically fails back after a stable recovery window
+
+Install config and start:
+
+```bash
+install -m 0644 deploy/failover.example.json /etc/mcproxy/failover.json
+systemctl enable --now dnsfailover
+```
+
+Inspect it:
+
+```bash
+systemctl status dnsfailover
+journalctl -u dnsfailover -f
+```
+
+Controller requirements:
+- separate controller host is preferred
+- Cloudflare API token with DNS edit permissions for the relevant zone
+- one hostname per server in the controller inventory
+- region health URLs pointing at `http://<proxy-ip>:<health_port>/healthz`
+
+## 8. Functional Verification
 
 ### Proxy startup sanity
 
@@ -378,6 +418,7 @@ On proxy host:
 
 ```bash
 systemctl status mcproxy
+curl -fsS http://127.0.0.1:18080/healthz
 ```
 
 Expect logs like:
@@ -437,6 +478,14 @@ Expected:
 - client succeeds
 - `nft list table ip mcproxy_node` shows the DNAT rule
 
+### DNS failover check
+
+If the failover controller is deployed:
+- break the regional proxy health endpoint or stop the regional proxy
+- confirm the controller switches affected hostnames to SG proxy IPs
+- restore the regional proxy
+- confirm the controller waits for the failback window, then restores regional answers
+
 ### Transparent-source path check
 
 The proxy does not dial backends from its Tailscale IP. It dials from the assigned internal identity, for example `10.1.0.10`.
@@ -460,7 +509,7 @@ Expected:
 - timeout means the backend path is still blocked before the service replies
 - refusal means the packet arrived but nothing accepted it on the backend path
 
-## 8. Operational Notes
+## 9. Operational Notes
 
 ### Redis/Valkey persistence
 
@@ -505,7 +554,7 @@ The implementation owns these tables:
 
 Do not place unrelated manual rules inside those managed chains unless you are prepared for them to be flushed by the application.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 ### Valkey image tag failure
 
@@ -617,6 +666,42 @@ ip route get 10.1.0.10
 
 The correct result should look like traffic to `10.1.0.10` using `tailscale0`, not the public interface.
 
+### Proxy health endpoint stays unhealthy
+
+The proxy health endpoint depends on proxy-local readiness, not backend customer traffic.
+
+Useful checks:
+
+```bash
+curl -v http://127.0.0.1:18080/healthz
+nft list tables | rg 'mcproxy_'
+ip route show table local | grep '10\.'
+redis-cli -h <redis-ip> -p <redis-port> -a '<password>' ping
+```
+
+It will report unhealthy if:
+- the intercept listener is not running
+- Redis/Valkey cannot be reached
+- required `mcproxy_*` nftables tables are missing
+- the local proxy subnet route is missing
+
+### DNS failover controller does not switch records
+
+Check:
+
+```bash
+systemctl status dnsfailover
+journalctl -u dnsfailover -n 100 --no-pager
+curl -fsS http://<proxy-ip>:18080/healthz
+```
+
+Common causes:
+- Cloudflare API token lacks DNS edit permissions
+- wrong zone ID
+- wrong hostname inventory in `failover.json`
+- health URL not reachable from the controller host
+- fallback region health is also failing
+
 ### ACLs must allow proxy subnet traffic
 
 Approving and serving the subnet route is not enough by itself. Tailscale/Headscale ACLs must also allow traffic sourced from the proxy subnet.
@@ -656,13 +741,14 @@ that usually means `banned-ips.json` contains legacy public IP bans, not proxy-a
 
 That warning is about identity promotion and does not by itself explain backend dial timeouts.
 
-## 10. Rollback
+## 11. Rollback
 
 To stop the system:
 
 ```bash
 systemctl disable --now mcproxy || true
 systemctl disable --now mcwatcher || true
+systemctl disable --now dnsfailover || true
 ```
 
 To remove managed nftables state:
@@ -682,7 +768,7 @@ ip route del local 10.1.0.0/16 dev lo
 
 Replace the subnet with the actual one assigned to that proxy.
 
-## 11. Related Validation Artifacts
+## 12. Related Validation Artifacts
 
 The deployment advice above comes directly from the staged labs:
 - [01-range-intercept-routing.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/01-range-intercept-routing.md)

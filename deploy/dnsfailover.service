@@ -1,0 +1,13 @@
+[Unit]
+Description=Sidero DNS Failover Controller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dnsfailover -config /etc/mcproxy/failover.json
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

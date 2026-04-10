@@ -4,6 +4,7 @@
   "redis_password": "change-me",
   "ip_ttl_seconds": 604800,
   "intercept_port": 19000,
+  "health_port": 18080,
   "port_range": {
     "start": 25500,
     "end": 25600
@@ -12,11 +13,13 @@
     {
       "name": "node-a",
       "proxy_public_ip": "203.0.113.10",
+      "hostnames": ["ingress-node-a.sidero.net"],
       "backend_ip": "100.72.10.5"
     },
     {
       "name": "node-b",
       "proxy_public_ip": "203.0.113.11",
+      "hostnames": ["ingress-node-b.sidero.net"],
       "backend_ip": "100.72.10.6"
     }
   ]

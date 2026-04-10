@@ -4,12 +4,16 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"sidero-proxy/internal/assignment"
 	"sidero-proxy/internal/config"
 	"sidero-proxy/internal/filter"
+	"sidero-proxy/internal/health"
 	"sidero-proxy/internal/logx"
 	"sidero-proxy/internal/nat"
 	"sidero-proxy/internal/redisutil"
@@ -68,7 +72,31 @@ func main() {
 	}
 
 	assigner := assignment.New(rdb, cfg.ProxyID, proxyNum, cfg.IPTTLSeconds)
+	listenerState := &health.ListenerState{}
+	checker := &health.Checker{
+		Listener: listenerState,
+		Redis: health.RedisPingerFunc(func(ctx context.Context) error {
+			return redisutil.Ping(ctx, rdb)
+		}),
+		Runner: health.ExecRunner{},
+		Subnet: info.Subnet,
+	}
+	healthServer := &http.Server{
+		Addr:    net.JoinHostPort("0.0.0.0", strconv.Itoa(cfg.HealthPort)),
+		Handler: health.NewServer(checker).Handler(),
+	}
+	go func() {
+		<-ctx.Done()
+		_ = healthServer.Shutdown(context.Background())
+	}()
+	go func() {
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			panic(fmt.Errorf("run health server: %w", err))
+		}
+	}()
+
 	r := router.New(cfg, assigner, natManager, source.TransparentDialer{}, logger)
+	r.SetReadyHook(listenerState.SetReady)
 	if err := r.Start(ctx); err != nil {
 		panic(fmt.Errorf("run proxy: %w", err))
 	}
