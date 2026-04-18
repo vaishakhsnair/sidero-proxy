@@ -15,8 +15,8 @@ This stage changes NAT lifecycle management to refcount by real IP:
 
 ## Code Changes
 
-- [nat.go](/home/onegrit/Documents/Projects/sidero-proxy/internal/nat/nat.go)
-- [nat_test.go](/home/onegrit/Documents/Projects/sidero-proxy/internal/nat/nat_test.go)
+- [nat.go](../../internal/nat/nat.go)
+- [nat_test.go](../../internal/nat/nat_test.go)
 
 `NATManager` now tracks:
 
@@ -37,7 +37,7 @@ GOCACHE=/tmp/go-build go build -o /tmp/mcproxy-proxy-test ./cmd/proxy
 
 Lab script:
 
-- [stage06_refcounted_nat_lifecycle.sh](/home/onegrit/Documents/Projects/sidero-proxy/scripts/lab/stage06_refcounted_nat_lifecycle.sh)
+- [stage06_refcounted_nat_lifecycle.sh](../../scripts/lab/stage06_refcounted_nat_lifecycle.sh)
 
 The lab creates:
 
@@ -68,23 +68,23 @@ Redis mapping:
 
 ```text
 proxy-1
-10.1.0.1
+<INTERNAL_IDENTITY_A>
 ```
 
 Proxy log excerpt:
 
 ```text
-connection established ... real_ip=172.31.12.20 internal_ip=10.1.0.1 ...
-connection established ... real_ip=172.31.12.20 internal_ip=10.1.0.1 ...
+connection established ... real_ip=<TEST_CLIENT_IP> internal_ip=<INTERNAL_IDENTITY_A> ...
+connection established ... real_ip=<TEST_CLIENT_IP> internal_ip=<INTERNAL_IDENTITY_A> ...
 ```
 
 Backend log excerpt:
 
 ```text
-start peer=10.1.0.1:44507 data=hold-one
-start peer=10.1.0.1:59373 data=quick-two
-end peer=10.1.0.1:59373 data=quick-two
-end peer=10.1.0.1:44507 data=hold-one
+start peer=<INTERNAL_IDENTITY_A>:44507 data=hold-one
+start peer=<INTERNAL_IDENTITY_A>:59373 data=quick-two
+end peer=<INTERNAL_IDENTITY_A>:59373 data=quick-two
+end peer=<INTERNAL_IDENTITY_A>:44507 data=hold-one
 ```
 
 That proves:

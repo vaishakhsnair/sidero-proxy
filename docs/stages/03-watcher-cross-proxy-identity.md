@@ -13,7 +13,7 @@ Build and syntax checks:
 - `GOCACHE=/tmp/go-build go build ./cmd/proxy ./cmd/watcher`
 
 Lab:
-- Script: [scripts/lab/stage03_watcher_cross_proxy_identity.sh](/home/onegrit/Documents/Projects/sidero-proxy/scripts/lab/stage03_watcher_cross_proxy_identity.sh)
+- Script: [scripts/lab/stage03_watcher_cross_proxy_identity.sh](../../scripts/lab/stage03_watcher_cross_proxy_identity.sh)
 - Topology:
   - 2 proxy identities (`proxy-1`, `proxy-2`)
   - 2 fake proxy public IPs on a temporary Docker bridge
@@ -23,20 +23,20 @@ Lab:
   - 1 watcher process
 
 Validated flow:
-- `proxy-2` registers first and receives subnet `10.1.0.0/16`.
-- `proxy-1` later handles the first real connection and receives subnet `10.2.0.0/16`.
-- First live connection through `proxy-1` caused backend peer `10.2.0.1`.
+- `proxy-2` registers first and receives subnet `<PROXY_SUBNET_A>`.
+- `proxy-1` later handles the first real connection and receives subnet `<PROXY_SUBNET_B>`.
+- First live connection through `proxy-1` caused backend peer `<INTERNAL_IDENTITY_B>`.
 - Watcher consumed that actual internal IP from `banned-ips.json`.
 - Watcher wrote permanent reserved mappings:
-  - `proxy-1 -> 10.2.0.1`
-  - `proxy-2 -> 10.1.0.1`
-- A later connection through `proxy-2` caused backend peer `10.1.0.1`.
+  - `proxy-1 -> <INTERNAL_IDENTITY_B>`
+  - `proxy-2 -> <INTERNAL_IDENTITY_A>`
+- A later connection through `proxy-2` caused backend peer `<INTERNAL_IDENTITY_A>`.
 
 Observed result:
 - Watcher log confirmed:
-  - `real_ip=172.31.6.20`
+  - `real_ip=<TEST_CLIENT_IP>`
   - `source_proxy=proxy-1`
-  - `reserved_mappings=map[proxy-1:10.2.0.1 proxy-2:10.1.0.1]`
+  - `reserved_mappings=map[proxy-1:<INTERNAL_IDENTITY_B> proxy-2:<INTERNAL_IDENTITY_A>]`
 - Backend log confirmed the same player presented different per-proxy internal identities exactly as reserved.
 
 Impact:

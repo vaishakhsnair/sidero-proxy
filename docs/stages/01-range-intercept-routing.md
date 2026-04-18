@@ -13,7 +13,7 @@ Build and syntax checks:
 - `GOCACHE=/tmp/go-build go build ./cmd/proxy ./cmd/watcher`
 
 Lab:
-- Script: [scripts/lab/stage01_range_routing.sh](/home/onegrit/Documents/Projects/sidero-proxy/scripts/lab/stage01_range_routing.sh)
+- Script: [scripts/lab/stage01_range_routing.sh](../../scripts/lab/stage01_range_routing.sh)
 - Topology:
   - 2 fake proxy public IPs on a temporary Docker bridge
   - 2 backend node containers

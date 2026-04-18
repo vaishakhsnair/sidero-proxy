@@ -12,7 +12,7 @@ Build and syntax checks:
 - `GOCACHE=/tmp/go-build go build ./cmd/watcher`
 
 Lab:
-- Script: [scripts/lab/stage04_node_dnat_range.sh](/home/onegrit/Documents/Projects/sidero-proxy/scripts/lab/stage04_node_dnat_range.sh)
+- Script: [scripts/lab/stage04_node_dnat_range.sh](../../scripts/lab/stage04_node_dnat_range.sh)
 - Topology:
   - 1 fake node public IP on a temporary Docker bridge
   - 1 fake node private IP on the same bridge

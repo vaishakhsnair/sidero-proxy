@@ -86,9 +86,9 @@ systemctl daemon-reload
 
 Tracked unit files:
 
-- [mcproxy.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcproxy.service)
-- [mcwatcher.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcwatcher.service)
-- [dnsfailover.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/dnsfailover.service)
+- [mcproxy.service](../deploy/mcproxy.service)
+- [mcwatcher.service](../deploy/mcwatcher.service)
+- [dnsfailover.service](../deploy/dnsfailover.service)
 
 ## 4. Redis Or Valkey Setup
 
@@ -102,9 +102,9 @@ Minimum requirements:
 Recommended:
 
 ```conf
-bind 127.0.0.1 100.x.x.x
+bind localhost 100.x.x.x
 port 6379
-requirepass change-me
+requirepass <REDACTED_SECRET>
 appendonly yes
 save 60 1000
 ```
@@ -115,8 +115,8 @@ If it is remote, bind it only to the private interface you actually use.
 
 The repo now includes a datastore-only compose deployment:
 
-- [docker-compose.valkey.yml](/home/onegrit/Documents/Projects/sidero-proxy/deploy/docker-compose.valkey.yml)
-- [.env.example](/home/onegrit/Documents/Projects/sidero-proxy/deploy/.env.example)
+- [docker-compose.valkey.yml](../deploy/docker-compose.valkey.yml)
+- [.env.example](../deploy/.env.example)
 
 This is the recommended quick-start if you want the datastore in Docker while keeping `mcproxy` and `mcwatcher` on the host.
 
@@ -166,8 +166,8 @@ Point the app configs at the same address:
 
 ```json
 {
-  "redis_addr": "100.100.100.10:6379",
-  "redis_password": "change-me"
+  "redis_addr": "<REDIS_PRIVATE_IP>:6379",
+  "redis_password": "<REDACTED_SECRET>"
 }
 ```
 
@@ -203,12 +203,12 @@ Without that, startup or forwarding will fail.
 
 ### Tailscale or private routing
 
-The implementation expects each proxy to own a unique `/16` from `10.0.0.0/8`.
+The implementation expects each proxy to own a unique `/16` from `<PROXY_SUBNET_POOL>`.
 
 Example:
 
 ```bash
-tailscale up --advertise-routes=10.1.0.0/16
+tailscale up --advertise-routes=<PROXY_SUBNET_A>
 ```
 
 On the node side or route-accepting side:
@@ -220,22 +220,22 @@ tailscale up --accept-routes
 The proxy itself also installs:
 
 ```bash
-ip route replace local 10.1.0.0/16 dev lo
+ip route replace local <PROXY_SUBNET_A> dev lo
 ```
 
 That local route is required so the host can originate backend connections from the assigned internal `10.x.x.x` identity.
 
 ### Proxy config
 
-Start from [config.example.json](/home/onegrit/Documents/Projects/sidero-proxy/deploy/config.example.json).
+Start from [config.example.json](../deploy/config.example.json).
 
 Example:
 
 ```json
 {
   "proxy_id": "proxy-1",
-  "redis_addr": "100.100.100.10:6379",
-  "redis_password": "change-me",
+  "redis_addr": "<REDIS_PRIVATE_IP>:6379",
+  "redis_password": "<REDACTED_SECRET>",
   "ip_ttl_seconds": 604800,
   "intercept_port": 19000,
   "health_port": 18080,
@@ -246,13 +246,13 @@ Example:
   "servers": [
     {
       "name": "node-a",
-      "proxy_public_ip": "203.0.113.10",
-      "backend_ip": "100.72.10.5"
+      "proxy_public_ip": "<PROXY_PUBLIC_IP_A>",
+      "backend_ip": "<BACKEND_NODE_A_PRIVATE_IP>"
     },
     {
       "name": "node-b",
-      "proxy_public_ip": "203.0.113.11",
-      "backend_ip": "100.72.10.6"
+      "proxy_public_ip": "<PROXY_PUBLIC_IP_B>",
+      "backend_ip": "<BACKEND_NODE_B_PRIVATE_IP>"
     }
   ]
 }
@@ -279,7 +279,7 @@ On startup, the proxy will:
   - `mcproxy_filter`
   - `mcproxy_intercept`
   - `mcproxy_nat`
-- listen on `0.0.0.0:<intercept_port>`
+- listen on `<LISTEN_ADDR>:<intercept_port>`
 
 At runtime, the proxy then:
 - adds `mcproxy_nat:nat_map` elements through the native Go nftables client
@@ -291,7 +291,7 @@ Inspect the service:
 ```bash
 systemctl status mcproxy
 journalctl -u mcproxy -f
-curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://localhost:18080/healthz
 ```
 
 ### What nftables objects the proxy owns
@@ -326,7 +326,7 @@ apt-get install -y nftables iproute2
 You need node-side DNAT if the Minecraft containers are published only on the node public IP, for example:
 
 ```text
-167.235.15.102:25565->25565/tcp
+<BACKEND_NODE_PUBLIC_IP>:25565->25565/tcp
 ```
 
 and the proxy is dialing the node private/Tailscale IP.
@@ -335,17 +335,17 @@ In that case, private-interface traffic to `private_ip:25565` will not automatic
 
 ### Watcher config
 
-Start from [watcher.example.json](/home/onegrit/Documents/Projects/sidero-proxy/deploy/watcher.example.json).
+Start from [watcher.example.json](../deploy/watcher.example.json).
 
 Example:
 
 ```json
 {
-  "redis_addr": "100.100.100.10:6379",
-  "redis_password": "change-me",
+  "redis_addr": "<REDIS_PRIVATE_IP>:6379",
+  "redis_password": "<REDACTED_SECRET>",
   "volumes_root": "/var/lib/pterodactyl/volumes",
   "node_dnat": {
-    "public_ip": "167.235.15.102",
+    "public_ip": "<BACKEND_NODE_PUBLIC_IP>",
     "tailscale_interface": "tailscale0",
     "port_range": {
       "start": 25500,
@@ -381,7 +381,7 @@ journalctl -u mcwatcher -f
 
 Use the DNS failover controller if you want regional proxy hostnames to fall back to SG automatically without paying for Cloudflare Load Balancing.
 
-Start from [failover.example.json](/home/onegrit/Documents/Projects/sidero-proxy/deploy/failover.example.json).
+Start from [failover.example.json](../deploy/failover.example.json).
 
 The controller:
 - probes a dedicated proxy health URL per region
@@ -418,7 +418,7 @@ On proxy host:
 
 ```bash
 systemctl status mcproxy
-curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://localhost:18080/healthz
 ```
 
 Expect logs like:
@@ -488,12 +488,12 @@ If the failover controller is deployed:
 
 ### Transparent-source path check
 
-The proxy does not dial backends from its Tailscale IP. It dials from the assigned internal identity, for example `10.1.0.10`.
+The proxy does not dial backends from its Tailscale IP. It dials from the assigned internal identity, for example `<INTERNAL_IDENTITY_A>`.
 
 That means this test is not sufficient:
 
 ```bash
-nc -vz 100.64.0.18 25551
+nc -vz <BACKEND_NODE_PRIVATE_IP> 25551
 ```
 
 because it uses the proxy host source IP, not the proxy-assigned internal identity.
@@ -501,7 +501,7 @@ because it uses the proxy host source IP, not the proxy-assigned internal identi
 Use this instead on the proxy host to emulate the proxy dataplane more closely:
 
 ```bash
-nc -s 10.1.0.10 -vz 100.64.0.18 25551
+nc -s <INTERNAL_IDENTITY_A> -vz <BACKEND_NODE_PRIVATE_IP> 25551
 ```
 
 Expected:
@@ -522,8 +522,8 @@ For production, enable at least one of:
 ### Order of proxy registration matters
 
 Subnets are assigned in registration order:
-- first registered proxy gets `10.1.0.0/16`
-- second gets `10.2.0.0/16`
+- first registered proxy gets `<PROXY_SUBNET_A>`
+- second gets `<PROXY_SUBNET_B>`
 
 This matters when interpreting watcher-promoted mappings in a multi-proxy environment.
 
@@ -623,27 +623,27 @@ This is the most important operational pitfall.
 This test:
 
 ```bash
-nc -vz 100.64.0.18 25551
+nc -vz <BACKEND_NODE_PRIVATE_IP> 25551
 ```
 
-only proves that `100.64.0.22 -> 100.64.0.18:25551` works.
+only proves that `<PROXY_NODE_PRIVATE_IP> -> <BACKEND_NODE_PRIVATE_IP>:25551` works.
 
 The proxy actually dials like:
 
 ```text
-10.1.0.10 -> 100.64.0.18:25551
+<INTERNAL_IDENTITY_A> -> <BACKEND_NODE_PRIVATE_IP>:25551
 ```
 
 If that path times out, check all of these:
 
 ```bash
-ip route get 10.1.0.10
+ip route get <INTERNAL_IDENTITY_A>
 ip route show table 52
-tcpdump -ni tailscale0 'tcp port 25551 and host 10.1.0.10'
+tcpdump -ni tailscale0 'tcp port 25551 and host <INTERNAL_IDENTITY_A>'
 ```
 
 On the backend node, success requires:
-- `10.1.0.0/16` learned via Tailscale, not routed out the public NIC
+- `<PROXY_SUBNET_A>` learned via Tailscale, not routed out the public NIC
 - backend node DNAT installed in `mcproxy_node`
 - ACLs allowing traffic from the proxy subnet to the backend node
 
@@ -653,7 +653,7 @@ Even if Headscale shows the route as approved and served, the backend node must 
 
 - run `tailscale up --accept-routes ...`
 - receive the route into table `52`
-- actually select `tailscale0` for `10.1.0.0/16`
+- actually select `tailscale0` for `<PROXY_SUBNET_A>`
 
 Useful checks:
 
@@ -661,10 +661,10 @@ Useful checks:
 tailscale debug prefs
 ip rule
 ip route show table 52
-ip route get 10.1.0.10
+ip route get <INTERNAL_IDENTITY_A>
 ```
 
-The correct result should look like traffic to `10.1.0.10` using `tailscale0`, not the public interface.
+The correct result should look like traffic to `<INTERNAL_IDENTITY_A>` using `tailscale0`, not the public interface.
 
 ### Proxy health endpoint stays unhealthy
 
@@ -673,7 +673,7 @@ The proxy health endpoint depends on proxy-local readiness, not backend customer
 Useful checks:
 
 ```bash
-curl -v http://127.0.0.1:18080/healthz
+curl -v http://localhost:18080/healthz
 nft list tables | rg 'mcproxy_'
 ip route show table local | grep '10\.'
 redis-cli -h <redis-ip> -p <redis-port> -a '<password>' ping
@@ -709,7 +709,7 @@ Approving and serving the subnet route is not enough by itself. Tailscale/Headsc
 A scalable pattern is to reserve the full proxy subnet pool in ACL hosts, for example:
 
 ```json
-"proxy-nets": "10.0.0.0/8"
+"proxy-nets": "<PROXY_SUBNET_POOL>"
 ```
 
 and then allow both directions:
@@ -734,7 +734,7 @@ This avoids adding new ACLs for every future proxy subnet.
 If watcher logs contain warnings like:
 
 ```text
-lookup reverse mapping for 41.92.99.132: redis: nil
+lookup reverse mapping for <EXTERNAL_PLAYER_IP>: redis: nil
 ```
 
 that usually means `banned-ips.json` contains legacy public IP bans, not proxy-assigned internal identities like `10.1.x.x`.
@@ -763,7 +763,7 @@ nft delete table ip mcproxy_node 2>/dev/null || true
 To remove the local route on a proxy:
 
 ```bash
-ip route del local 10.1.0.0/16 dev lo
+ip route del local <PROXY_SUBNET_A> dev lo
 ```
 
 Replace the subnet with the actual one assigned to that proxy.
@@ -771,10 +771,10 @@ Replace the subnet with the actual one assigned to that proxy.
 ## 12. Related Validation Artifacts
 
 The deployment advice above comes directly from the staged labs:
-- [01-range-intercept-routing.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/01-range-intercept-routing.md)
-- [02-transparent-source-identity.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/02-transparent-source-identity.md)
-- [03-watcher-cross-proxy-identity.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/03-watcher-cross-proxy-identity.md)
-- [04-node-dnat-range.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/04-node-dnat-range.md)
-- [05-prefilter-blocklist.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/05-prefilter-blocklist.md)
-- [06-refcounted-nat-lifecycle.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/06-refcounted-nat-lifecycle.md)
-- [07-native-nftables-hot-path.md](/home/onegrit/Documents/Projects/sidero-proxy/docs/stages/07-native-nftables-hot-path.md)
+- [01-range-intercept-routing.md](stages/01-range-intercept-routing.md)
+- [02-transparent-source-identity.md](stages/02-transparent-source-identity.md)
+- [03-watcher-cross-proxy-identity.md](stages/03-watcher-cross-proxy-identity.md)
+- [04-node-dnat-range.md](stages/04-node-dnat-range.md)
+- [05-prefilter-blocklist.md](stages/05-prefilter-blocklist.md)
+- [06-refcounted-nat-lifecycle.md](stages/06-refcounted-nat-lifecycle.md)
+- [07-native-nftables-hot-path.md](stages/07-native-nftables-hot-path.md)

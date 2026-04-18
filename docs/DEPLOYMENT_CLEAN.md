@@ -86,10 +86,10 @@ The intended hostname model is:
 So if a player connects through:
 
 ```text
-play.customer.com -> SRV -> ingress-server1.example.net:25551
+<CUSTOMER_HOSTNAME> -> SRV -> <INGRESS_HOST_A>:25551
 ```
 
-the proxy will usually see `ingress-server1.example.net` in the handshake and dial:
+the proxy will usually see `<INGRESS_HOST_A>` in the handshake and dial:
 
 ```text
 <backend-tailscale-ip>:25551
@@ -102,14 +102,14 @@ This is the Minecraft equivalent of virtual-host routing:
 
 ### 3.2 Player identity
 
-Each proxy receives its own `/16` from `10.0.0.0/8`, for example:
+Each proxy receives its own `/16` from `<PROXY_SUBNET_POOL>`, for example:
 
-- `proxy-1 -> 10.1.0.0/16`
-- `proxy-2 -> 10.2.0.0/16`
+- `proxy-1 -> <PROXY_SUBNET_A>`
+- `proxy-2 -> <PROXY_SUBNET_B>`
 
 For each real player IP, the proxy assigns an internal identity in its own `/16`, such as:
 
-- `10.1.0.10`
+- `<INTERNAL_IDENTITY_A>`
 
 The backend then sees traffic from that internal identity instead of the proxy host IP.
 
@@ -118,7 +118,7 @@ The backend then sees traffic from that internal identity instead of the proxy h
 If a Minecraft container is published only on the node public IP, for example:
 
 ```text
-167.235.15.102:25551->25551/tcp
+<BACKEND_NODE_PUBLIC_IP>:25551->25551/tcp
 ```
 
 then traffic sent to the node Tailscale IP will not automatically hit the container.
@@ -167,11 +167,11 @@ The proxy specifically needs root because it must:
 Tracked examples:
 
 - proxy config:
-  - [config.example.json](/home/onegrit/Documents/Projects/sidero-proxy/deploy/config.example.json)
+  - [config.example.json](../deploy/config.example.json)
 - watcher config:
-  - [watcher.example.json](/home/onegrit/Documents/Projects/sidero-proxy/deploy/watcher.example.json)
+  - [watcher.example.json](../deploy/watcher.example.json)
 - DNS failover config:
-  - [failover.example.json](/home/onegrit/Documents/Projects/sidero-proxy/deploy/failover.example.json)
+  - [failover.example.json](../deploy/failover.example.json)
 
 Installed locations:
 
@@ -198,9 +198,9 @@ GOCACHE=/tmp/go-build go build -o /usr/local/bin/dnsfailover ./cmd/dnsfailover
 
 Systemd unit files:
 
-- [mcproxy.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcproxy.service)
-- [mcwatcher.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/mcwatcher.service)
-- [dnsfailover.service](/home/onegrit/Documents/Projects/sidero-proxy/deploy/dnsfailover.service)
+- [mcproxy.service](../deploy/mcproxy.service)
+- [mcwatcher.service](../deploy/mcwatcher.service)
+- [dnsfailover.service](../deploy/dnsfailover.service)
 
 Install them:
 
@@ -228,8 +228,8 @@ Recommended location:
 
 Tracked Docker compose:
 
-- [docker-compose.valkey.yml](/home/onegrit/Documents/Projects/sidero-proxy/deploy/docker-compose.valkey.yml)
-- [.env.example](/home/onegrit/Documents/Projects/sidero-proxy/deploy/.env.example)
+- [docker-compose.valkey.yml](../deploy/docker-compose.valkey.yml)
+- [.env.example](../deploy/.env.example)
 
 Quick start:
 
@@ -299,7 +299,7 @@ Inspect it:
 ```bash
 systemctl status mcproxy
 journalctl -u mcproxy -f
-curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://localhost:18080/healthz
 ```
 
 ### 8.4 What the proxy creates
@@ -313,7 +313,7 @@ The proxy creates and manages:
 It also installs a local route like:
 
 ```text
-local 10.1.0.0/16 dev lo
+local <PROXY_SUBNET_A> dev lo
 ```
 
 The health endpoint is healthy only when:
@@ -387,14 +387,14 @@ Important rule:
 Example:
 
 ```dns
-_minecraft._tcp.play.customer.com.  SRV 0 0 25551 ingress-server1.example.net.
+_minecraft._tcp.<CUSTOMER_HOSTNAME>.  SRV 0 0 25551 <INGRESS_HOST_A>.
 ```
 
 The ingress hostname should resolve to proxy IPs, not node IPs.
 
 The proxy should be configured with the ingress hostname it will actually see in the handshake, for example:
 
-- `ingress-server1.example.net`
+- `<INGRESS_HOST_A>`
 
 Do not assume the handshake hostname will always be the vanity hostname the customer typed. With SRV, the proxy-managed ingress hostname is the safe routing identity.
 
@@ -453,7 +453,7 @@ This system requires both route approval and ACL permission.
 Each proxy must advertise its assigned subnet:
 
 ```bash
-tailscale up --advertise-routes=10.1.0.0/16
+tailscale up --advertise-routes=<PROXY_SUBNET_A>
 ```
 
 ### 12.2 Backend nodes
@@ -471,7 +471,7 @@ Approving a route is not enough. ACLs must also allow traffic sourced from proxy
 Recommended scalable ACL alias:
 
 ```json
-"proxy-nets": "10.0.0.0/8"
+"proxy-nets": "<PROXY_SUBNET_POOL>"
 ```
 
 Then allow both directions:
@@ -497,13 +497,13 @@ Check:
 
 ```bash
 ip route show table 52
-ip route get 10.1.0.10
+ip route get <INTERNAL_IDENTITY_A>
 ```
 
 Expected shape:
 
 ```text
-10.1.0.10 dev tailscale0 table 52 ...
+<INTERNAL_IDENTITY_A> dev tailscale0 table 52 ...
 ```
 
 ## 13. Validation
@@ -511,7 +511,7 @@ Expected shape:
 ### 13.1 Proxy health
 
 ```bash
-curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://localhost:18080/healthz
 ```
 
 Expected:
@@ -538,7 +538,7 @@ nft list table ip mcproxy_node
 Do not rely only on:
 
 ```bash
-nc -vz 100.64.0.18 25551
+nc -vz <BACKEND_NODE_PRIVATE_IP> 25551
 ```
 
 That only tests from the proxy host’s Tailscale IP.
@@ -546,7 +546,7 @@ That only tests from the proxy host’s Tailscale IP.
 Test the real dataplane shape instead:
 
 ```bash
-nc -s 10.1.0.10 -vz 100.64.0.18 25551
+nc -s <INTERNAL_IDENTITY_A> -vz <BACKEND_NODE_PRIVATE_IP> 25551
 ```
 
 ### 13.5 End-to-end traffic
@@ -596,5 +596,5 @@ nft delete table ip mcproxy_node 2>/dev/null || true
 Remove proxy local route if needed:
 
 ```bash
-ip route del local 10.1.0.0/16 dev lo
+ip route del local <PROXY_SUBNET_A> dev lo
 ```

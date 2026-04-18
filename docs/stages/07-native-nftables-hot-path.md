@@ -14,10 +14,10 @@ The remaining hot-path cost was that every first connect and last disconnect for
 
 ## Code Changes
 
-- [main.go](/home/onegrit/Documents/Projects/sidero-proxy/cmd/proxy/main.go)
-- [nat.go](/home/onegrit/Documents/Projects/sidero-proxy/internal/nat/nat.go)
-- [go.mod](/home/onegrit/Documents/Projects/sidero-proxy/go.mod)
-- [go.sum](/home/onegrit/Documents/Projects/sidero-proxy/go.sum)
+- [main.go](../../cmd/proxy/main.go)
+- [nat.go](../../internal/nat/nat.go)
+- [go.mod](../../go.mod)
+- [go.sum](../../go.sum)
 
 Implementation details:
 
@@ -43,7 +43,7 @@ GOCACHE=/tmp/go-build go build -o /tmp/mcproxy-proxy-test ./cmd/proxy
 
 Functional validation reused the stage 06 same-IP concurrency lab:
 
-- [stage06_refcounted_nat_lifecycle.sh](/home/onegrit/Documents/Projects/sidero-proxy/scripts/lab/stage06_refcounted_nat_lifecycle.sh)
+- [stage06_refcounted_nat_lifecycle.sh](../../scripts/lab/stage06_refcounted_nat_lifecycle.sh)
 
 The point of rerunning the exact same scenario here was to prove that the dataplane implementation changed while externally visible behavior stayed correct.
 
@@ -62,17 +62,17 @@ quick
 Proxy log excerpt:
 
 ```text
-connection established ... real_ip=172.31.12.20 internal_ip=10.1.0.1 ...
-connection established ... real_ip=172.31.12.20 internal_ip=10.1.0.1 ...
+connection established ... real_ip=<TEST_CLIENT_IP> internal_ip=<INTERNAL_IDENTITY_A> ...
+connection established ... real_ip=<TEST_CLIENT_IP> internal_ip=<INTERNAL_IDENTITY_A> ...
 ```
 
 Backend log excerpt:
 
 ```text
-start peer=10.1.0.1:45297 data=hold-one
-start peer=10.1.0.1:52641 data=quick-two
-end peer=10.1.0.1:52641 data=quick-two
-end peer=10.1.0.1:45297 data=hold-one
+start peer=<INTERNAL_IDENTITY_A>:45297 data=hold-one
+start peer=<INTERNAL_IDENTITY_A>:52641 data=quick-two
+end peer=<INTERNAL_IDENTITY_A>:52641 data=quick-two
+end peer=<INTERNAL_IDENTITY_A>:45297 data=hold-one
 ```
 
 That confirms:

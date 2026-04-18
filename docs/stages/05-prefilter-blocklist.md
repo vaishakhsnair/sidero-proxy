@@ -15,7 +15,7 @@ Build and syntax checks:
 - `GOCACHE=/tmp/go-build go build ./cmd/proxy`
 
 Lab:
-- Script: [scripts/lab/stage05_prefilter_blocklist.sh](/home/onegrit/Documents/Projects/sidero-proxy/scripts/lab/stage05_prefilter_blocklist.sh)
+- Script: [scripts/lab/stage05_prefilter_blocklist.sh](../../scripts/lab/stage05_prefilter_blocklist.sh)
 - Topology:
   - 1 fake proxy public IP on a temporary Docker bridge
   - 1 backend node container
